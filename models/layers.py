@@ -73,6 +73,8 @@ class CastedEmbedding(nn.Module):
                  cast_to: torch.dtype):
         super().__init__()
         self.cast_to = cast_to
+        self.num_embeddings = num_embeddings
+        self.embedding_dim = embedding_dim
 
         # Truncated LeCun normal init
         self.embedding_weight = nn.Parameter(

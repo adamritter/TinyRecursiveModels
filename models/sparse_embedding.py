@@ -12,6 +12,10 @@ class CastedSparseEmbedding(nn.Module):
     def __init__(self, num_embeddings: int, embedding_dim: int, batch_size: int, init_std: float, cast_to: torch.dtype):
         super().__init__()
         self.cast_to = cast_to
+        self.num_embeddings = num_embeddings
+        self.embedding_dim = embedding_dim
+        self.batch_size = batch_size
+        self.cast_to = cast_to
 
         # Real Weights
         # Truncated LeCun normal init
