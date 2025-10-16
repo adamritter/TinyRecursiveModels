@@ -58,7 +58,12 @@ class CastedLinear(nn.Module):
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         return F.linear(input, self.weight.to(input.dtype), bias=self.bias.to(input.dtype) if self.bias is not None else None)
-
+    
+    def extra_repr(self) -> str:
+        s = f'in_features={self.in_features}, out_features={self.out_features}'
+        if self.bias is None:
+            s += ', bias=False'
+        return s
 
 class CastedEmbedding(nn.Module):
     def __init__(self,
@@ -76,7 +81,13 @@ class CastedEmbedding(nn.Module):
         
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         return F.embedding(input, self.embedding_weight.to(self.cast_to))
-
+    
+    def extra_repr(self) -> str:
+        return (
+            f"num_embeddings={self.num_embeddings}, "
+            f"embedding_dim={self.embedding_dim}, "
+            f"cast_to={self.cast_to}"
+        )
 
 class RotaryEmbedding(nn.Module):
     def __init__(self, dim, max_position_embeddings, base, device=None):

@@ -37,6 +37,13 @@ class CastedSparseEmbedding(nn.Module):
 
         return self.local_weights.to(self.cast_to)
 
+    def extra_repr(self) -> str:
+        return (
+            f"num_embeddings={self.num_embeddings}, "
+            f"embedding_dim={self.embedding_dim}, "
+            f"batch_size={self.batch_size}, "
+            f"cast_to={self.cast_to}"
+        )
 
 class CastedSparseEmbeddingSignSGD_Distributed(Optimizer):
     def __init__(
