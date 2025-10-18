@@ -340,6 +340,31 @@ def train_batch(config: PretrainConfig, train_state: TrainState, batch: Any, glo
             reduced_metrics = {f"train/{k}": v / (global_batch_size if k.endswith("loss") else count) for k, v in reduced_metrics.items()}
 
             reduced_metrics["train/lr"] = lr_this_step
+            # ---- Dynamic halt_max_steps adjustment ----
+            # If an environment variable provides a maximum‑step override and the
+            # model is already halting accurately, expand the halt budget.
+            max_step_override_env = (
+                os.environ.get("MAX_STEP_OVERRIDE")
+                or os.environ.get("HALT_MAX_STEPS_OVERRIDE")
+            )
+            if max_step_override_env is not None and "train/q_halt_accuracy" in reduced_metrics:
+                try:
+                    override_val = int(max_step_override_env)
+                    current_halt_max = getattr(config.arch, "halt_max_steps", None)
+                    if (
+                        current_halt_max is not None
+                        and reduced_metrics["train/q_halt_accuracy"] > 0.99
+                        and override_val > current_halt_max
+                    ):
+                        # Increase allowed halt steps by one
+                        setattr(config.arch, "halt_max_steps", current_halt_max + 1)
+                        if rank == 0:
+                            print(
+                                f"Auto‑increased arch.halt_max_steps to {config.arch.halt_max_steps}"
+                            )
+                except ValueError:
+                    # Ignore malformed override values
+                    pass
             return reduced_metrics
 
 def evaluate(
