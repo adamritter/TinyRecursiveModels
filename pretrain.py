@@ -350,17 +350,17 @@ def train_batch(config: PretrainConfig, train_state: TrainState, batch: Any, glo
             if max_step_override_env is not None and "train/q_halt_accuracy" in reduced_metrics:
                 try:
                     override_val = int(max_step_override_env)
-                    current_halt_max = getattr(config.arch, "halt_max_steps", None)
+                    current_halt_max = train_state.config.halt_max_steps
                     if (
                         current_halt_max is not None
                         and reduced_metrics["train/q_halt_accuracy"] > 0.99
                         and override_val > current_halt_max
                     ):
                         # Increase allowed halt steps by one
-                        setattr(config.arch, "halt_max_steps", current_halt_max + 1)
+                        train_state.config.halt_max_steps = current_halt_max + 1
                         if rank == 0:
                             print(
-                                f"Auto‑increased arch.halt_max_steps to {config.arch.halt_max_steps}"
+                                f"Auto‑increased arch.halt_max_steps to {train_state.config.halt_max_steps}"
                             )
                 except ValueError:
                     # Ignore malformed override values
