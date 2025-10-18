@@ -286,6 +286,9 @@ def create_evaluators(config: PretrainConfig, eval_metadata: PuzzleDatasetMetada
 
     return evaluators
 
+
+train_batch_counter = 0
+
 def train_batch(config: PretrainConfig, train_state: TrainState, batch: Any, global_batch_size: int, rank: int, world_size: int):
     train_state.step += 1
     if train_state.step > train_state.total_steps:  # At most train_total_steps
@@ -353,15 +356,20 @@ def train_batch(config: PretrainConfig, train_state: TrainState, batch: Any, glo
                     current_halt_max = train_state.model.model.config.halt_max_steps
                     if (
                         current_halt_max is not None
-                        and reduced_metrics["train/q_halt_accuracy"] > 0.99
+                        and reduced_metrics["train/q_halt_accuracy"] > 0.95
                         and override_val > current_halt_max
                     ):
-                        # Increase allowed halt steps by one
-                        train_state.model.model.config.halt_max_steps = current_halt_max + 1
-                        if rank == 0:
-                            print(
-                                f"Auto‑increased arch.halt_max_steps to {train_state.model.model.config.halt_max_steps}"
-                            )
+                        global train_batch_counter
+                        train_batch_counter += 1
+                        if train_batch_counter == 5:
+                            # Increase allowed halt steps by one
+                            train_state.model.model.config.halt_max_steps = current_halt_max + 1
+                            if rank == 0:
+                                print(
+                                    f"Auto‑increased arch.halt_max_steps to {train_state.model.model.config.halt_max_steps}"
+                                )
+                        else:
+                            train_batch_counter = 0
                 except ValueError:
                     # Ignore malformed override values
                     pass
