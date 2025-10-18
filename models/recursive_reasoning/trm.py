@@ -10,7 +10,7 @@ import random
 from models.common import trunc_normal_init_
 from models.layers import rms_norm, LinearSwish, SwiGLU, Attention, RotaryEmbedding, CosSin, CastedEmbedding, CastedLinear
 from models.sparse_embedding import CastedSparseEmbedding
-
+import os
 IGNORE_LABEL_ID = -100
 
 @dataclass
@@ -27,6 +27,7 @@ class TinyRecursiveReasoningModel_ACTV1Carry:
     halted: torch.Tensor
     
     current_data: Dict[str, torch.Tensor]
+    prev_q: torch.Tensor  # previous q_halt logit for Δq calculation
 
 
 class TinyRecursiveReasoningModel_ACTV1Config(BaseModel):
@@ -243,10 +244,14 @@ class TinyRecursiveReasoningModel_ACTV1(nn.Module):
             steps=torch.zeros((batch_size, ), dtype=torch.int32),
             halted=torch.ones((batch_size, ), dtype=torch.bool),  # Default to halted
             
-            current_data={k: torch.empty_like(v) for k, v in batch.items()}
+            current_data={k: torch.empty_like(v) for k, v in batch.items()},
+            prev_q=torch.zeros((batch_size,), dtype=torch.float32),
         )
         
     def forward(self, carry: TinyRecursiveReasoningModel_ACTV1Carry, batch: Dict[str, torch.Tensor]) -> Tuple[TinyRecursiveReasoningModel_ACTV1Carry, Dict[str, torch.Tensor]]:
+
+        # Reset prev_q for sequences that halted in the previous step
+        prev_q_reset = torch.where(carry.halted, torch.zeros_like(carry.prev_q), carry.prev_q)
 
         # Update data, carry (removing halted sequences)
         new_inner_carry = self.inner.reset_carry(carry.halted, carry.inner_carry)
@@ -258,10 +263,14 @@ class TinyRecursiveReasoningModel_ACTV1(nn.Module):
         # Forward inner model
         new_inner_carry, logits, (q_halt_logits, q_continue_logits) = self.inner(new_inner_carry, new_current_data)
 
+        delta_q = None
+        next_delta_p = None
+
+
         outputs = {
             "logits": logits,
             "q_halt_logits": q_halt_logits,
-            "q_continue_logits": q_continue_logits
+            "q_continue_logits": q_continue_logits,
         }
 
         with torch.no_grad():
@@ -277,7 +286,18 @@ class TinyRecursiveReasoningModel_ACTV1(nn.Module):
                 # Halt signal
                 # NOTE: During evaluation, always use max steps, this is to guarantee the same halting steps inside a batch for batching purposes
                 
-                if self.config.no_ACT_continue:
+                if os.getenv("DELTA_P_HALT"):
+                    delta_p_halt = float(os.getenv("DELTA_P_HALT"))
+                    delta_q = q_halt_logits - prev_q_reset
+                    # Extrapolate probability change using the sigmoid of q
+                    next_q_halt_logits = q_halt_logits + delta_q
+                    p_t = torch.sigmoid(q_halt_logits)
+                    p_next = torch.sigmoid(next_q_halt_logits)
+                    next_delta_p = p_next - p_t
+                    halted = halted | (next_delta_p <= delta_p_halt)
+                    outputs["delta_p_halt"] = delta_p_halt
+                    outputs["delta_q"] = delta_q
+                elif self.config.no_ACT_continue:
                     halted = halted | (q_halt_logits > 0)
                 else:
                     halted = halted | (q_halt_logits > q_continue_logits)
@@ -294,4 +314,15 @@ class TinyRecursiveReasoningModel_ACTV1(nn.Module):
                     _, _, (next_q_halt_logits, next_q_continue_logits), _, _ = self.inner(new_inner_carry, new_current_data)
                     outputs["target_q_continue"] = torch.sigmoid(torch.where(is_last_step, next_q_halt_logits, torch.maximum(next_q_halt_logits, next_q_continue_logits)))
 
-        return TinyRecursiveReasoningModel_ACTV1Carry(new_inner_carry, new_steps, halted, new_current_data), outputs
+        # Compute new prev_q to carry forward
+        new_prev_q = torch.where(halted, torch.zeros_like(q_halt_logits), q_halt_logits.detach())
+
+
+
+        return TinyRecursiveReasoningModel_ACTV1Carry(
+            new_inner_carry,
+            new_steps,
+            halted,
+            new_current_data,
+            new_prev_q,
+        ), outputs
