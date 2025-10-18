@@ -354,22 +354,23 @@ def train_batch(config: PretrainConfig, train_state: TrainState, batch: Any, glo
                 try:
                     override_val = int(max_step_override_env)
                     current_halt_max = train_state.model.model.config.halt_max_steps
+                    global train_batch_counter
+                    train_batch_counter += 1
                     if (
                         current_halt_max is not None
                         and reduced_metrics["train/q_halt_accuracy"] > 0.95
                         and override_val > current_halt_max
                     ):
-                        global train_batch_counter
-                        train_batch_counter += 1
                         if train_batch_counter == 5:
                             # Increase allowed halt steps by one
                             train_state.model.model.config.halt_max_steps = current_halt_max + 1
-                            if rank == 0:
-                                print(
-                                    f"Auto‑increased arch.halt_max_steps to {train_state.model.model.config.halt_max_steps}"
-                                )
-                        else:
+                            print(
+                                f"Auto‑increased arch.halt_max_steps to {train_state.model.model.config.halt_max_steps}"
+                            )
                             train_batch_counter = 0
+                            
+                    else:
+                        train_batch_counter = 0
                 except ValueError:
                     # Ignore malformed override values
                     pass
