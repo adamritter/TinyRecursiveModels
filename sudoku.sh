@@ -1,0 +1,1 @@
+python pretrain.py arch=trm data_paths="[/home/ubuntu/lambdacluoud/data/sudoku-extreme-1k-aug-1000]" evaluators="[]" epochs=50000 weight_decay=1.0 puzzle_emb_weight_decay=1.0 lr_warmup_steps=50 arch.mlp_t=True arch.pos_encodings=none arch.L_layers=2 arch.H_cycles=3 arch.L_cycles=6 ema=True "$@"
