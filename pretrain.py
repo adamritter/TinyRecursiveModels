@@ -367,7 +367,7 @@ def train_batch(config: PretrainConfig, train_state: TrainState, batch: Any, glo
             if max_step_override_env is not None and "train/q_halt_accuracy" in reduced_metrics:
                 try:
                     override_val = int(max_step_override_env)
-                    global train_batch_counter, effective_halt_max_steps_state
+                    global train_batch_counter
                     current_halt_max = int(effective_halt_max_steps_state)
                     train_batch_counter += 1
                     if (reduced_metrics["train/q_halt_accuracy"] > 0.95 and override_val > current_halt_max):
