@@ -424,10 +424,15 @@ def evaluate(
 
             # Forward
             inference_steps = 0
+            if effective_halt_max_steps_state is None:
+                effective_halt_max_steps_state = int(train_state.model.model.config.halt_max_steps)
+            eff_limit_t = torch.tensor(effective_halt_max_steps_state, device="cuda", dtype=torch.int32)
             while True:
                 carry, loss, metrics, preds, all_finish = train_state.model(
-                    carry=carry, batch=batch, return_keys=return_keys,
-                    effective_halt_max_steps_state=effective_halt_max_steps_state
+                    carry=carry,
+                    batch=batch,
+                    return_keys=return_keys,
+                    effective_halt_max_steps=eff_limit_t,
                 )
                 inference_steps += 1
 
