@@ -392,6 +392,7 @@ def evaluate(
     world_size: int,
     cpu_group: Optional[dist.ProcessGroup],
 ):
+    global effective_halt_max_steps_state
     reduced_metrics = None
 
     with torch.inference_mode():
@@ -425,7 +426,8 @@ def evaluate(
             inference_steps = 0
             while True:
                 carry, loss, metrics, preds, all_finish = train_state.model(
-                    carry=carry, batch=batch, return_keys=return_keys
+                    carry=carry, batch=batch, return_keys=return_keys,
+                    effective_halt_max_steps_state=effective_halt_max_steps_state
                 )
                 inference_steps += 1
 
