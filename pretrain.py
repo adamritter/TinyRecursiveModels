@@ -288,6 +288,8 @@ def create_evaluators(config: PretrainConfig, eval_metadata: PuzzleDatasetMetada
 
 
 train_batch_counter = 0
+# Current per-batch step budget (we avoid mutating model.config.halt_max_steps)
+effective_halt_max_steps_state = None
 
 def train_batch(config: PretrainConfig, train_state: TrainState, batch: Any, global_batch_size: int, rank: int, world_size: int):
     train_state.step += 1
@@ -302,8 +304,20 @@ def train_batch(config: PretrainConfig, train_state: TrainState, batch: Any, glo
         with torch.device("cuda"):
             train_state.carry = train_state.model.initial_carry(batch)  # type: ignore
 
+    # ----- Effective halt limit (tensor) -----
+    global effective_halt_max_steps_state
+    if effective_halt_max_steps_state is None:
+        # Initialize once from model’s configured cap
+        effective_halt_max_steps_state = int(train_state.model.model.config.halt_max_steps)
+    eff_limit_t = torch.tensor(effective_halt_max_steps_state, device="cuda", dtype=torch.int32)
+
     # Forward
-    train_state.carry, loss, metrics, _, _ = train_state.model(carry=train_state.carry, batch=batch, return_keys=[])
+    train_state.carry, loss, metrics, _, _ = train_state.model(
+        carry=train_state.carry,
+        batch=batch,
+        return_keys=[],
+        effective_halt_max_steps=eff_limit_t,  # <— new arg
+    )
 
     ((1 / global_batch_size) * loss).backward()
 
@@ -343,9 +357,9 @@ def train_batch(config: PretrainConfig, train_state: TrainState, batch: Any, glo
             reduced_metrics = {f"train/{k}": v / (global_batch_size if k.endswith("loss") else count) for k, v in reduced_metrics.items()}
 
             reduced_metrics["train/lr"] = lr_this_step
-            # ---- Dynamic halt_max_steps adjustment ----
-            # If an environment variable provides a maximum‑step override and the
-            # model is already halting accurately, expand the halt budget.
+            # ---- Dynamic effective halt_max_steps adjustment (no module mutation) ----
+            # If an environment variable provides a maximum-step override and the
+            # model is already halting accurately, expand the per-batch budget.
             max_step_override_env = (
                 os.environ.get("MAX_STEP_OVERRIDE")
                 or os.environ.get("HALT_MAX_STEPS_OVERRIDE")
@@ -353,22 +367,14 @@ def train_batch(config: PretrainConfig, train_state: TrainState, batch: Any, glo
             if max_step_override_env is not None and "train/q_halt_accuracy" in reduced_metrics:
                 try:
                     override_val = int(max_step_override_env)
-                    current_halt_max = train_state.model.model.config.halt_max_steps
-                    global train_batch_counter
+                    global train_batch_counter, effective_halt_max_steps_state
+                    current_halt_max = int(effective_halt_max_steps_state)
                     train_batch_counter += 1
-                    if (
-                        current_halt_max is not None
-                        and reduced_metrics["train/q_halt_accuracy"] > 0.95
-                        and override_val > current_halt_max
-                    ):
+                    if (reduced_metrics["train/q_halt_accuracy"] > 0.95 and override_val > current_halt_max):
                         if train_batch_counter == 5:
-                            # Increase allowed halt steps by one
-                            train_state.model.model.config.halt_max_steps = current_halt_max + 1
-                            print(
-                                f"Auto‑increased arch.halt_max_steps to {train_state.model.model.config.halt_max_steps}"
-                            )
+                            effective_halt_max_steps_state = current_halt_max + 1
+                            print(f"Auto-increased effective halt_max_steps to {effective_halt_max_steps_state} (no module mutation)")
                             train_batch_counter = 0
-                            
                     else:
                         train_batch_counter = 0
                 except ValueError:

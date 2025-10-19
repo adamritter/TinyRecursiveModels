@@ -248,7 +248,12 @@ class TinyRecursiveReasoningModel_ACTV1(nn.Module):
             prev_q=torch.zeros((batch_size,), dtype=torch.float32),
         )
         
-    def forward(self, carry: TinyRecursiveReasoningModel_ACTV1Carry, batch: Dict[str, torch.Tensor]) -> Tuple[TinyRecursiveReasoningModel_ACTV1Carry, Dict[str, torch.Tensor]]:
+    def forward(
+        self,
+        carry: TinyRecursiveReasoningModel_ACTV1Carry,
+        batch: Dict[str, torch.Tensor],
+        effective_halt_max_steps: torch.Tensor,  # scalar tensor on CUDA, same dtype as steps
+    ) -> Tuple[TinyRecursiveReasoningModel_ACTV1Carry, Dict[str, torch.Tensor]]:
 
         # Reset prev_q for sequences that halted in the previous step
         prev_q_reset = torch.where(carry.halted, torch.zeros_like(carry.prev_q), carry.prev_q)
@@ -276,7 +281,8 @@ class TinyRecursiveReasoningModel_ACTV1(nn.Module):
         with torch.no_grad():
             # Step
             new_steps = new_steps + 1
-            is_last_step = new_steps >= self.config.halt_max_steps
+            # NOTE: pass the limit as a tensor to avoid Dynamo specializing on a module int
+            is_last_step = new_steps >= effective_halt_max_steps
             
             halted = is_last_step
 
@@ -303,7 +309,12 @@ class TinyRecursiveReasoningModel_ACTV1(nn.Module):
                     halted = halted | (q_halt_logits > q_continue_logits)
 
                 # Exploration
-                min_halt_steps = (torch.rand_like(q_halt_logits) < self.config.halt_exploration_prob) * torch.randint_like(new_steps, low=2, high=self.config.halt_max_steps + 1)
+                # Sample integer in [2, effective_halt_max_steps] without introducing a Python int guard
+                explore_mask = (torch.rand_like(q_halt_logits) < self.config.halt_exploration_prob)
+                rand_steps = 2 + torch.floor(
+                    torch.rand_like(new_steps, dtype=torch.float32) * (effective_halt_max_steps.to(torch.float32) - 1)
+                ).to(new_steps.dtype)
+                min_halt_steps = explore_mask * rand_steps
                 halted = halted & (new_steps >= min_halt_steps)
 
                 if not self.config.no_ACT_continue:
