@@ -529,7 +529,7 @@ def evaluate(
                         "q_halt_loss": torch.tensor(0.0, device="cuda"),
                     }
                 all_finish = True
-                print(f" Completed partial-finish inference in {inference_steps} steps, metrics: {metrics}")
+                print(f" Completed partial-finish inference in {inference_steps} steps")
             else:
                 # Default mode: run full-batch until all_finish is True
                 while True:
@@ -585,6 +585,7 @@ def evaluate(
             )
 
         del save_preds
+        print("metric values: ", metric_values)
 
         # Reduce to rank 0
         if metric_values is not None:
@@ -634,6 +635,7 @@ def evaluate(
                 
         if rank == 0:
             print("All evaluators completed!")
+        print("reduced metrics: ", reduced_metrics)
 
     return reduced_metrics
 
