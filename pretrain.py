@@ -529,6 +529,7 @@ def evaluate(
                         "q_halt_loss": torch.tensor(0.0, device="cuda"),
                     }
                 all_finish = True
+                print(f" Completed partial-finish inference in {inference_steps} steps, metrics: {metrics}")
             else:
                 # Default mode: run full-batch until all_finish is True
                 while True:
