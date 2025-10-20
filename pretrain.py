@@ -1,4 +1,4 @@
-from time import time
+import time
 from typing import Optional, Any, Sequence, List
 from dataclasses import dataclass
 import os
