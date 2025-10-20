@@ -436,24 +436,15 @@ def evaluate(
             # Implement partial-finish indexing mode using q_halt_logits > 0
             if config.eval_partial_finish:
                 B = batch["inputs"].shape[0]
-                alive = torch.arange(B, device="cuda")
+                global_alive = torch.arange(B, device="cuda")
                 final_preds: dict = {}
-                last_keep_mask = None
-                last_alive = None
-                last_sub_preds = None
-                # Run at most the configured max steps
-                for _ in range(int(effective_halt_max_steps_state)):
-                    if alive.numel() == 0:
+                step_counts = torch.zeros(B, dtype=torch.int32, device="cuda")
+                sub_batch = batch
+                # Run up to the halt cap; on last step force-finish all remaining
+                max_steps = int(effective_halt_max_steps_state)
+                for t in range(max_steps):
+                    if global_alive.numel() == 0:
                         break
-                    sub_batch = batch if alive.numel() == B else {k: v.index_select(0, alive) for k, v in batch.items()}
-                    if alive.numel() != B:
-                        carry.inner_carry.z_H = carry.inner_carry.z_H.index_select(0, alive)
-                        carry.inner_carry.z_L = carry.inner_carry.z_L.index_select(0, alive)
-                        carry.steps = carry.steps.index_select(0, alive)
-                        carry.halted = carry.halted.index_select(0, alive)
-                        carry.prev_q = carry.prev_q.index_select(0, alive)
-                        carry.current_data = {k: v.index_select(0, alive) for k, v in carry.current_data.items()}
-
                     carry, loss, metrics, sub_preds, _ = train_state.model(
                         carry=carry,
                         batch=sub_batch,
@@ -468,31 +459,75 @@ def evaluate(
 
                     q_vals = sub_preds.get("q_halt_logits")
                     if q_vals is None:
-                        # No q values; fall back to last outputs
+                        # If no q values, just write outputs for all remaining and stop
                         for k, v in sub_preds.items():
-                            final_preds[k][:] = v if v.shape[0] == B else final_preds[k]
-                        alive = alive[:0]
+                            final_preds[k][global_alive] = v
+                        global_alive = global_alive[:0]
                         break
 
-                    finish_mask = q_vals > 0
+                    finish_mask = (q_vals > 0)
+                    if t == max_steps - 1:
+                        finish_mask = torch.ones_like(finish_mask, dtype=torch.bool)
+
                     if finish_mask.any():
-                        finished_global = alive[finish_mask]
+                        finished_global = global_alive[finish_mask]
                         for k, v in sub_preds.items():
                             final_preds[k][finished_global] = v[finish_mask]
+                        step_counts[finished_global] = t + 1
 
-                    # Prepare next iteration
-                    last_keep_mask = ~finish_mask
-                    last_alive = alive
-                    last_sub_preds = sub_preds
-                    alive = alive[last_keep_mask]
-
-                # If some remain (hit step cap), write their last outputs
-                if last_sub_preds is not None and alive.numel() > 0:
-                    remaining_global = last_alive[last_keep_mask]  # type: ignore
-                    for k, v in last_sub_preds.items():
-                        final_preds[k][remaining_global] = v[last_keep_mask]
+                    keep_mask = ~finish_mask
+                    if keep_mask.any():
+                        # Narrow carry and sub_batch by local keep_mask
+                        idx_keep = torch.nonzero(keep_mask, as_tuple=False).squeeze(-1)
+                        global_alive = global_alive[keep_mask]
+                        # Update carry tensors in place to only continuing samples
+                        carry.inner_carry.z_H = carry.inner_carry.z_H.index_select(0, idx_keep)
+                        carry.inner_carry.z_L = carry.inner_carry.z_L.index_select(0, idx_keep)
+                        carry.steps = carry.steps.index_select(0, idx_keep)
+                        carry.halted = carry.halted.index_select(0, idx_keep)
+                        carry.prev_q = carry.prev_q.index_select(0, idx_keep)
+                        carry.current_data = {k: v.index_select(0, idx_keep) for k, v in carry.current_data.items()}
+                        # Update sub_batch from original full batch using new global indices to avoid drift
+                        sub_batch = {k: batch[k].index_select(0, global_alive) for k, v in sub_batch.items()}
+                    else:
+                        # Everyone finished
+                        global_alive = global_alive[:0]
+                        break
 
                 preds = final_preds
+                # Build minimal metrics from finalized predictions (keeps evaluator flow intact)
+                labels = batch.get("labels")
+                if labels is not None and "preds" in preds:
+                    mask_tok = (labels != -100)
+                    valid_counts = mask_tok.sum(-1)
+                    count = (valid_counts > 0).sum()
+                    correct_tok = (preds["preds"] == labels) & mask_tok
+                    frac_correct = torch.where(valid_counts > 0, correct_tok.sum(-1) / valid_counts.clamp_min(1), torch.zeros_like(valid_counts, dtype=torch.float32))
+                    accuracy_sum = frac_correct.sum()
+                    exact = (correct_tok.sum(-1) == valid_counts) & (valid_counts > 0)
+                    exact_sum = exact.sum()
+                    q_logits = preds.get("q_halt_logits")
+                    q_acc = ((q_logits >= 0) == exact).sum() if q_logits is not None else torch.tensor(0, device="cuda")
+                    steps_sum = step_counts.to(torch.float32).sum()
+                    metrics = {
+                        "count": count.to(torch.float32),
+                        "accuracy": accuracy_sum.to(torch.float32),
+                        "exact_accuracy": exact_sum.to(torch.float32),
+                        "q_halt_accuracy": q_acc.to(torch.float32),
+                        "steps": steps_sum,
+                        "lm_loss": torch.tensor(0.0, device="cuda"),
+                        "q_halt_loss": torch.tensor(0.0, device="cuda"),
+                    }
+                else:
+                    metrics = {
+                        "count": torch.tensor(float(B), device="cuda"),
+                        "accuracy": torch.tensor(0.0, device="cuda"),
+                        "exact_accuracy": torch.tensor(0.0, device="cuda"),
+                        "q_halt_accuracy": torch.tensor(0.0, device="cuda"),
+                        "steps": step_counts.to(torch.float32).sum(),
+                        "lm_loss": torch.tensor(0.0, device="cuda"),
+                        "q_halt_loss": torch.tensor(0.0, device="cuda"),
+                    }
                 all_finish = True
             else:
                 # Default mode: run full-batch until all_finish is True
