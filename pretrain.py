@@ -78,6 +78,8 @@ class PretrainConfig(pydantic.BaseModel):
     eval_interval: Optional[int] = None
     min_eval_interval: Optional[int] = 0 # when to start eval
     eval_save_outputs: List[str] = []
+    # Evaluation behavior
+    eval_partial_finish: bool = False  # If True, evaluate with per-sample early stopping via indexing
 
     ema: bool = False # use Exponential-Moving-Average
     ema_rate: float = 0.999 # EMA-rate
@@ -401,6 +403,9 @@ def evaluate(
         for evaluator in evaluators:
             evaluator.begin_eval()
             return_keys.update(evaluator.required_outputs)
+        # Ensure q_halt_logits is available if partial-finish mode is enabled
+        if config.eval_partial_finish:
+            return_keys.add("q_halt_logits")
 
         # Run evaluation
         set_ids = {k: idx for idx, k in enumerate(eval_metadata.sets)}
@@ -428,18 +433,80 @@ def evaluate(
             if effective_halt_max_steps_state is None:
                 effective_halt_max_steps_state = int(train_state.model.model.config.halt_max_steps)
             eff_limit_t = torch.tensor(effective_halt_max_steps_state, device="cuda", dtype=torch.int32)
-            # TODO: implement a mode where indexing is used to skip already finished examples from the batch
-            while True:
-                carry, loss, metrics, preds, all_finish = train_state.model(
-                    carry=carry,
-                    batch=batch,
-                    return_keys=return_keys,
-                    effective_halt_max_steps=eff_limit_t,
-                )
-                inference_steps += 1
+            # Implement partial-finish indexing mode using q_halt_logits > 0
+            if config.eval_partial_finish:
+                B = batch["inputs"].shape[0]
+                alive = torch.arange(B, device="cuda")
+                final_preds: dict = {}
+                last_keep_mask = None
+                last_alive = None
+                last_sub_preds = None
+                # Run at most the configured max steps
+                for _ in range(int(effective_halt_max_steps_state)):
+                    if alive.numel() == 0:
+                        break
+                    sub_batch = batch if alive.numel() == B else {k: v.index_select(0, alive) for k, v in batch.items()}
+                    if alive.numel() != B:
+                        carry.inner_carry.z_H = carry.inner_carry.z_H.index_select(0, alive)
+                        carry.inner_carry.z_L = carry.inner_carry.z_L.index_select(0, alive)
+                        carry.steps = carry.steps.index_select(0, alive)
+                        carry.halted = carry.halted.index_select(0, alive)
+                        carry.prev_q = carry.prev_q.index_select(0, alive)
+                        carry.current_data = {k: v.index_select(0, alive) for k, v in carry.current_data.items()}
 
-                if all_finish:
-                    break
+                    carry, loss, metrics, sub_preds, _ = train_state.model(
+                        carry=carry,
+                        batch=sub_batch,
+                        return_keys=return_keys,
+                        effective_halt_max_steps=eff_limit_t,
+                    )
+                    inference_steps += 1
+
+                    if not final_preds:
+                        for k, v in sub_preds.items():
+                            final_preds[k] = torch.empty((B, *v.shape[1:]), dtype=v.dtype, device=v.device)
+
+                    q_vals = sub_preds.get("q_halt_logits")
+                    if q_vals is None:
+                        # No q values; fall back to last outputs
+                        for k, v in sub_preds.items():
+                            final_preds[k][:] = v if v.shape[0] == B else final_preds[k]
+                        alive = alive[:0]
+                        break
+
+                    finish_mask = q_vals > 0
+                    if finish_mask.any():
+                        finished_global = alive[finish_mask]
+                        for k, v in sub_preds.items():
+                            final_preds[k][finished_global] = v[finish_mask]
+
+                    # Prepare next iteration
+                    last_keep_mask = ~finish_mask
+                    last_alive = alive
+                    last_sub_preds = sub_preds
+                    alive = alive[last_keep_mask]
+
+                # If some remain (hit step cap), write their last outputs
+                if last_sub_preds is not None and alive.numel() > 0:
+                    remaining_global = last_alive[last_keep_mask]  # type: ignore
+                    for k, v in last_sub_preds.items():
+                        final_preds[k][remaining_global] = v[last_keep_mask]
+
+                preds = final_preds
+                all_finish = True
+            else:
+                # Default mode: run full-batch until all_finish is True
+                while True:
+                    carry, loss, metrics, preds, all_finish = train_state.model(
+                        carry=carry,
+                        batch=batch,
+                        return_keys=return_keys,
+                        effective_halt_max_steps=eff_limit_t,
+                    )
+                    inference_steps += 1
+
+                    if all_finish:
+                        break
 
             if rank == 0:
                 print(f"  Completed inference in {inference_steps} steps")
