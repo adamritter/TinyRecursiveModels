@@ -498,8 +498,6 @@ def evaluate(
                 preds = final_preds
                 # Build minimal metrics from finalized predictions (keeps evaluator flow intact)
                 labels = batch.get("labels")
-                print("batch labels: ", labels)
-                print("preds: ", preds)
                 if labels is not None and "preds" in preds:
                     mask_tok = (labels != -100)
                     valid_counts = mask_tok.sum(-1)
