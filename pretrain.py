@@ -1,3 +1,4 @@
+from time import time
 from typing import Optional, Any, Sequence, List
 from dataclasses import dataclass
 import os
@@ -422,6 +423,7 @@ def evaluate(
         processed_batches = 0
         
         for set_name, batch, global_batch_size in eval_loader:
+            tm = time.time()
             processed_batches += 1
             if rank == 0:
                 print(f"Processing batch {processed_batches}: {set_name}")
@@ -540,7 +542,7 @@ def evaluate(
                         break
 
             if rank == 0:
-                print(f"  Completed inference in {inference_steps} steps")
+                print(f"  Completed inference in {inference_steps} steps ({time.time()-tm:.1f}s)")
 
             for collection in (batch, preds):
                 for k, v in collection.items():
