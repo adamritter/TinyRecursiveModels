@@ -403,9 +403,10 @@ def evaluate(
         for evaluator in evaluators:
             evaluator.begin_eval()
             return_keys.update(evaluator.required_outputs)
-        # Ensure q_halt_logits is available if partial-finish mode is enabled
+        # Ensure needed outputs are available if partial-finish mode is enabled
         if config.eval_partial_finish:
             return_keys.add("q_halt_logits")
+            return_keys.add("preds")
 
         # Run evaluation
         set_ids = {k: idx for idx, k in enumerate(eval_metadata.sets)}
@@ -497,6 +498,8 @@ def evaluate(
                 preds = final_preds
                 # Build minimal metrics from finalized predictions (keeps evaluator flow intact)
                 labels = batch.get("labels")
+                print("batch labels: ", labels)
+                print("preds: ", preds)
                 if labels is not None and "preds" in preds:
                     mask_tok = (labels != -100)
                     valid_counts = mask_tok.sum(-1)
@@ -519,15 +522,7 @@ def evaluate(
                         "q_halt_loss": torch.tensor(0.0, device="cuda"),
                     }
                 else:
-                    metrics = {
-                        "count": torch.tensor(float(B), device="cuda"),
-                        "accuracy": torch.tensor(0.0, device="cuda"),
-                        "exact_accuracy": torch.tensor(0.0, device="cuda"),
-                        "q_halt_accuracy": torch.tensor(0.0, device="cuda"),
-                        "steps": step_counts.to(torch.float32).sum(),
-                        "lm_loss": torch.tensor(0.0, device="cuda"),
-                        "q_halt_loss": torch.tensor(0.0, device="cuda"),
-                    }
+                    raise RuntimeError("Labels not found in batch for partial-finish evaluation.")
                 all_finish = True
                 print(f" Completed partial-finish inference in {inference_steps} steps")
             else:
