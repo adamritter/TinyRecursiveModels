@@ -80,7 +80,7 @@ class PretrainConfig(pydantic.BaseModel):
     min_eval_interval: Optional[int] = 0 # when to start eval
     eval_save_outputs: List[str] = []
     # Evaluation behavior
-    eval_partial_finish: bool = False  # If True, evaluate with per-sample early stopping via indexing
+    eval_partial_finish: bool = True  # If True, evaluate with per-sample early stopping via indexing
     # Limit number of eval batches processed (None or <=0 = no limit)
     max_eval_batches: Optional[int] = None
 
