@@ -1,0 +1,3 @@
+#!/bin/sh
+# Usage: ./sudokueval.sh +run_name="eval 4..1024  128" arch.halt_max_steps=128 +load_checkpoint=/home/ubuntu/lambdacluoud/checkpoints/Sudoku-extreme-1k-aug-1000-ACT-torch/4..1024\ inf32/step_13020
+python pretrain.py +eval_only=true  data_paths=[/home/ubuntu/lambdacluoud/data/sudoku-extreme-1k-aug-1000] arch.mlp_t=True arch.pos_encodings=none arch.L_layers=2 arch.H_cycles=3 arch.L_cycles=6 ema=True "$@"
