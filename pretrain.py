@@ -82,6 +82,7 @@ class PretrainConfig(pydantic.BaseModel):
     ema: bool = False # use Exponential-Moving-Average
     ema_rate: float = 0.999 # EMA-rate
     freeze_weights: bool = False # If True, freeze weights and only learn the embeddings
+    eval_only: bool = False  # If True, skip training and run a single evaluation pass after loading the checkpoint
 
 @dataclass
 class TrainState:
@@ -427,6 +428,7 @@ def evaluate(
             if effective_halt_max_steps_state is None:
                 effective_halt_max_steps_state = int(train_state.model.model.config.halt_max_steps)
             eff_limit_t = torch.tensor(effective_halt_max_steps_state, device="cuda", dtype=torch.int32)
+            # TODO: implement a mode where indexing is used to skip already finished examples from the batch
             while True:
                 carry, loss, metrics, preds, all_finish = train_state.model(
                     carry=carry,
@@ -642,6 +644,42 @@ def launch(hydra_config: DictConfig):
         ema_helper = EMAHelper(mu=config.ema_rate)
         ema_helper.register(train_state.model)
 
+    # --- Evaluation‑only mode -------------------------------------------------
+    if config.eval_only:
+        if RANK == 0:
+            print("EVALUATION ONLY - no training will be performed")
+        # If EMA is enabled, switch to the EMA weights before evaluating
+        if config.ema and ema_helper is not None:
+            print("SWITCH TO EMA")
+            train_state_eval = copy.deepcopy(train_state)
+            train_state_eval.model = ema_helper.ema_copy(train_state_eval.model)
+        else:
+            train_state_eval = train_state
+
+        train_state_eval.model.eval()
+        metrics = evaluate(
+            config,
+            train_state_eval,
+            eval_loader,
+            eval_metadata,
+            evaluators,
+            rank=RANK,
+            world_size=WORLD_SIZE,
+            cpu_group=CPU_PROCESS_GROUP,
+        )
+
+        if RANK == 0 and metrics is not None:
+            wandb.log(metrics, step=train_state_eval.step)
+
+        # Optionally save checkpoint of evaluated model
+        if RANK == 0:
+            save_train_state(config, train_state_eval)
+
+        # Clean up and exit early
+        if dist.is_initialized():
+            dist.destroy_process_group()
+        wandb.finish()
+        return
     # Training Loop
     for _iter_id in range(total_iters):
         print (f"[Rank {RANK}, World Size {WORLD_SIZE}]: Epoch {_iter_id * train_epochs_per_iter}")
