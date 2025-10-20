@@ -80,6 +80,8 @@ class PretrainConfig(pydantic.BaseModel):
     eval_save_outputs: List[str] = []
     # Evaluation behavior
     eval_partial_finish: bool = False  # If True, evaluate with per-sample early stopping via indexing
+    # Limit number of eval batches processed (None or <=0 = no limit)
+    max_eval_batches: Optional[int] = None
 
     ema: bool = False # use Exponential-Moving-Average
     ema_rate: float = 0.999 # EMA-rate
@@ -565,6 +567,16 @@ def evaluate(
             metric_values[set_id] += torch.stack([metrics[k] for k in metric_keys])
 
             del metrics
+
+            # Stop early if a maximum number of eval batches is set in config
+            if (
+                config.max_eval_batches is not None
+                and config.max_eval_batches > 0
+                and processed_batches >= config.max_eval_batches
+            ):
+                if rank == 0:
+                    print(f"Reached max_eval_batches={config.max_eval_batches}; stopping evaluation early.")
+                break
 
         # concatenate save preds
         save_preds = {k: torch.cat(v, dim=0) for k, v in save_preds.items()}

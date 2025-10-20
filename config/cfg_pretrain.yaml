@@ -20,6 +20,8 @@ global_batch_size: 768
 epochs: 100000
 eval_interval: 10000
 checkpoint_every_eval: True
+# Limit number of evaluation batches (null or <=0 = no limit)
+max_eval_batches: null
 
 lr: 1e-4
 lr_min_ratio: 1.0
