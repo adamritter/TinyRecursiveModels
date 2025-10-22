@@ -45,3 +45,7 @@ freeze_weights: False # If True, freeze weights and only learn the embeddings
 
 # Dynamic halt-step growth cap (replaces MAX_STEP_OVERRIDE env var)
 max_step_override: null
+
+# If set, this overrides the arch.halt_max_steps to initialize
+# the effective halting step budget used during train/eval.
+iterate_halt_max_steps: null

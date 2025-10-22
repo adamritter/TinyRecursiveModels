@@ -92,6 +92,10 @@ class PretrainConfig(pydantic.BaseModel):
     freeze_weights: bool = False # If True, freeze weights and only learn the embeddings
     eval_only: bool = False  # If True, skip training and run a single evaluation pass after loading the checkpoint
 
+    # Optional: if set, use this value instead of the model arch's
+    # halt_max_steps to initialize the effective halt step budget.
+    iterate_halt_max_steps: Optional[int] = None
+
 @dataclass
 class TrainState:
     model: nn.Module
@@ -316,8 +320,13 @@ def train_batch(config: PretrainConfig, train_state: TrainState, batch: Any, glo
     # ----- Effective halt limit (tensor) -----
     global effective_halt_max_steps_state
     if effective_halt_max_steps_state is None:
-        # Initialize once from model’s configured cap
-        effective_halt_max_steps_state = int(train_state.model.model.config.halt_max_steps)
+        # Initialize once from configured override if present, otherwise from model’s cap
+        base_halt = (
+            int(config.iterate_halt_max_steps)
+            if config.iterate_halt_max_steps is not None
+            else int(train_state.model.model.config.halt_max_steps)
+        )
+        effective_halt_max_steps_state = base_halt
     eff_limit_t = torch.tensor(effective_halt_max_steps_state, device="cuda", dtype=torch.int32)
 
     # Forward
@@ -430,7 +439,11 @@ def evaluate(
             # Forward
             inference_steps = 0
             if effective_halt_max_steps_state is None:
-                effective_halt_max_steps_state = int(train_state.model.model.config.halt_max_steps)
+                effective_halt_max_steps_state = int(
+                    config.iterate_halt_max_steps
+                    if config.iterate_halt_max_steps is not None
+                    else train_state.model.model.config.halt_max_steps
+                )
             eff_limit_t = torch.tensor(effective_halt_max_steps_state, device="cuda", dtype=torch.int32)
             # Implement partial-finish indexing mode using q_halt_logits > 0
             if config.eval_partial_finish:
