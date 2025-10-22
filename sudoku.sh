@@ -1,3 +1,3 @@
 #!/bin/sh
-# Usage: MAX_STEP_OVERRIDE=1024 ./sudoku.sh +run_name="4..1024" eval_interval=10000 lr=4e-4 puzzle_emb_lr=4e-4 arch.halt_max_steps=4
+# Usage: ./sudoku.sh +run_name="4..1024" max_step_override=1024 eval_interval=10000 lr=4e-4 puzzle_emb_lr=4e-4 arch.halt_max_steps=4
 python pretrain.py arch=trm data_paths="[/home/ubuntu/lambdacluoud/data/sudoku-extreme-1k-aug-1000]" evaluators="[]" epochs=50000 weight_decay=1.0 puzzle_emb_weight_decay=1.0 lr_warmup_steps=50 arch.mlp_t=True arch.pos_encodings=none arch.L_layers=2 arch.H_cycles=3 arch.L_cycles=6 ema=True "$@"

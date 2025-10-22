@@ -83,6 +83,9 @@ class PretrainConfig(pydantic.BaseModel):
     eval_partial_finish: bool = False  # If True, evaluate with per-sample early stopping via indexing
     # Limit number of eval batches processed (None or <=0 = no limit)
     max_eval_batches: Optional[int] = None
+    # Optional cap to which the dynamic per-batch halt step budget may grow
+    # (replaces the MAX_STEP_OVERRIDE env var)
+    max_step_override: Optional[int] = None
 
     ema: bool = False # use Exponential-Moving-Average
     ema_rate: float = 0.999 # EMA-rate
@@ -364,28 +367,19 @@ def train_batch(config: PretrainConfig, train_state: TrainState, batch: Any, glo
 
             reduced_metrics["train/lr"] = lr_this_step
             # ---- Dynamic effective halt_max_steps adjustment (no module mutation) ----
-            # If an environment variable provides a maximum-step override and the
-            # model is already halting accurately, expand the per-batch budget.
-            max_step_override_env = (
-                os.environ.get("MAX_STEP_OVERRIDE")
-                or os.environ.get("HALT_MAX_STEPS_OVERRIDE")
-            )
-            if max_step_override_env is not None and "train/q_halt_accuracy" in reduced_metrics:
-                try:
-                    override_val = int(max_step_override_env)
-                    global train_batch_counter
-                    current_halt_max = int(effective_halt_max_steps_state)
-                    train_batch_counter += 1
-                    if (reduced_metrics["train/q_halt_accuracy"] > 0.95 and override_val > current_halt_max):
-                        if train_batch_counter == 5:
-                            effective_halt_max_steps_state = current_halt_max + 1
-                            print(f"Auto-increased effective halt_max_steps to {effective_halt_max_steps_state} (no module mutation)")
-                            train_batch_counter = 0
-                    else:
+            # Use configured `max_step_override` instead of env var.
+            override_val = config.max_step_override
+            if override_val is not None and "train/q_halt_accuracy" in reduced_metrics:
+                global train_batch_counter
+                current_halt_max = int(effective_halt_max_steps_state)
+                train_batch_counter += 1
+                if (reduced_metrics["train/q_halt_accuracy"] > 0.95 and override_val > current_halt_max):
+                    if train_batch_counter == 5:
+                        effective_halt_max_steps_state = current_halt_max + 1
+                        print(f"Auto-increased effective halt_max_steps to {effective_halt_max_steps_state} (no module mutation)")
                         train_batch_counter = 0
-                except ValueError:
-                    # Ignore malformed override values
-                    pass
+                else:
+                    train_batch_counter = 0
             return reduced_metrics
 
 def evaluate(
