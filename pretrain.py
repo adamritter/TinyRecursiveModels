@@ -290,6 +290,7 @@ def create_evaluators(config: PretrainConfig, eval_metadata: PuzzleDatasetMetada
     data_paths =config.data_paths_test if len(config.data_paths_test)>0 else config.data_paths
     # Initialize evaluators
     evaluators = []
+    print("In create_evaluators, config.evaluators: ", config.evaluators)
     for cfg in config.evaluators:
         for data_path in data_paths:
             cls = load_model_class(cfg.name, "evaluators.")(
