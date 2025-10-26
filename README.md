@@ -1,3 +1,47 @@
+# Adaptive step size for TRM evaluation
+
+This is a modified codebase of the TRM model (https://github.com/AlexiaJM/TinyRecursiveModels). It improves the test result on Sudoku Extreme task from 87% to 96%
+by dynamically stopping evaluation and using at most 1024 steps instead of exactly 16 steps at evaluation.
+
+It can use the same model that was trained with the original TRM code base using
+
+
+```bash
+run_name="pretrain_mlp_t_sudoku"
+python pretrain.py \
+arch=trm \
+data_paths="[data/sudoku-extreme-1k-aug-1000]" \
+evaluators="[]" \
+epochs=50000 \
+lr=1e-4 puzzle_emb_lr=1e-4 weight_decay=1.0 puzzle_emb_weight_decay=1.0 \
+arch.mlp_t=True arch.pos_encodings=none \
+arch.L_layers=2 \
+arch.H_cycles=3 arch.L_cycles=6 \
++run_name=${run_name} ema=True```
+
+Evaluation can be skipped as it has to be done separately from model training because of some bug in the PyTorch compiler (it evaluates much slower
+1024 steps if that code is not run separately).
+
+The evaluation can be run with this code:
+
+
+```bash
+run_name="pretrain_mlp_t_sudoku"
+python pretrain.py \
+arch=trm \
+data_paths="[data/sudoku-extreme-1k-aug-1000]" \
+evaluators="[]" \
++eval_only=true +eval_partial_finish=true +load_checkpoint=checkpoints/pretrain_mlp_t_sudoku/step_65104 global_batch_size=7680 \
+lr=1e-4 puzzle_emb_lr=1e-4 weight_decay=1.0 puzzle_emb_weight_decay=1.0 \
+arch.mlp_t=True arch.pos_encodings=none \
+arch.L_layers=2 \
+arch.H_cycles=3 arch.L_cycles=6 \
++run_name=eval_mlp_t_sudoku_1024dynamic ema=True
+```
+
+Where load_checkpoint points to the last checkpoint
+
+
 # Less is More: Recursive Reasoning with Tiny Networks
 
 This is the codebase for the paper: "Less is More: Recursive Reasoning with Tiny Networks". TRM is a recursive reasoning approach that achieves amazing scores of 45% on ARC-AGI-1 and 8% on ARC-AGI-2 using a tiny 7M parameters neural network.
