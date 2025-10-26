@@ -37,7 +37,8 @@ lr=1e-4 puzzle_emb_lr=1e-4 weight_decay=1.0 puzzle_emb_weight_decay=1.0 \
 arch.mlp_t=True arch.pos_encodings=none \
 arch.L_layers=2 \
 arch.H_cycles=3 arch.L_cycles=6 \
-+run_name=eval_mlp_t_sudoku_1024dynamic ema=True
++run_name=eval_mlp_t_sudoku_1024dynamic ema=True \
+arch.halt_max_steps=1024
 ```
 
 Where load_checkpoint points to the last checkpoint
