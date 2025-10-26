@@ -1,6 +1,6 @@
 # Adaptive step size for TRM evaluation
 
-This is a modified codebase of the TRM model (https://github.com/AlexiaJM/TinyRecursiveModels). It improves the test result on Sudoku Extreme task from 87% to 96%
+This is a modified codebase of the TRM model (https://github.com/SamsungSAILMontreal/TinyRecursiveModels). It improves the test result on Sudoku Extreme task from 87% to 96%
 by dynamically stopping evaluation and using at most 1024 steps instead of exactly 16 steps at evaluation.
 
 It can use the same model that was trained with the original TRM code base using
