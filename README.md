@@ -7,7 +7,6 @@ It can use the same model that was trained with the original TRM code base using
 
 
 ```bash
-run_name="pretrain_mlp_t_sudoku"
 python pretrain.py \
 arch=trm \
 data_paths="[data/sudoku-extreme-1k-aug-1000]" \
@@ -17,7 +16,7 @@ lr=1e-4 puzzle_emb_lr=1e-4 weight_decay=1.0 puzzle_emb_weight_decay=1.0 \
 arch.mlp_t=True arch.pos_encodings=none \
 arch.L_layers=2 \
 arch.H_cycles=3 arch.L_cycles=6 \
-+run_name=${run_name} ema=True
++run_name=pretrain_mlp_t_sudoku ema=True
 ```
 
 Evaluation can be skipped as it has to be done separately from model training because of some bug in the PyTorch compiler (it evaluates much slower
@@ -27,7 +26,6 @@ The evaluation can be run with this code:
 
 
 ```bash
-run_name="pretrain_mlp_t_sudoku"
 python pretrain.py \
 arch=trm \
 data_paths="[data/sudoku-extreme-1k-aug-1000]" \
