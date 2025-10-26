@@ -31,7 +31,7 @@ arch=trm \
 data_paths="[data/sudoku-extreme-1k-aug-1000]" \
 evaluators="[]" \
 +eval_only=true +eval_partial_finish=true \
-+load_checkpoint=checkpoints/pretrain_mlp_t_sudoku/step_65104 \
++load_checkpoint=checkpoints/Sudoku-extreme-1k-aug-1000-ACT-torch/pretrain_mlp_t_sudoku/step_65100 \
 global_batch_size=7680 \
 lr=1e-4 puzzle_emb_lr=1e-4 weight_decay=1.0 puzzle_emb_weight_decay=1.0 \
 arch.mlp_t=True arch.pos_encodings=none \
