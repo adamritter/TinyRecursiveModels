@@ -180,9 +180,9 @@ if __name__ == "__main__":
             cand1 = os.path.join(args.datapath, split, "all_labels.npy")
             cand2 = os.path.join(args.datapath, split, "all__labels.npy")
             if os.path.exists(cand1):
-                return np.load(cand1)
+                return torch.from_numpy(np.load(cand1))
             if os.path.exists(cand2):
-                return np.load(cand2)
+                return torch.from_numpy(np.load(cand2))
             raise FileNotFoundError(f"Could not find labels at {cand1} or {cand2}")
 
         # Load solved sequences as 'good' examples (kept flat)
@@ -196,10 +196,9 @@ if __name__ == "__main__":
         maxv = int(train_labels.max())
 
         # Create random 'bad' examples that match shape and value range
-        rng = np.random.default_rng(42)
-        train_bad = rng.integers(low=minv, high=maxv + 1, size=train_labels.shape, dtype=np.int64)
-        test_bad = rng.integers(low=minv, high=maxv + 1, size=test_labels.shape, dtype=np.int64)
-
+        rng = torch.manual_seed(42)
+        train_bad = rng.integers(low=minv, high=maxv + 1, size=train_labels.shape, dtype=torch.int64)
+        test_bad = rng.integers(low=minv, high=maxv + 1, size=test_labels.shape, dtype=torch.int64)
 
         print(f"Value range for encoding: min={minv}, max={maxv}")
 
