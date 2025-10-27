@@ -167,7 +167,7 @@ class TinyRecursiveReasoningModel_ACTV1_Inner(nn.Module):
             # Zero-out only the last projection so initial outputs are near constant
             last_linear = self.q_head[-1]
             last_linear.weight.zero_()
-            last_linear.bias.fill_(-5)  # type: ignore
+            # last_linear.bias.fill_(-5)  # type: ignore
 
     def _input_embeddings(self, input: torch.Tensor, puzzle_identifiers: torch.Tensor):
         # Token embedding
