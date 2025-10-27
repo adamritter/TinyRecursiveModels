@@ -130,7 +130,13 @@ class TinyRecursiveReasoningModel_ACTV1_Inner(nn.Module):
         self.embed_tokens = CastedEmbedding(self.config.vocab_size, self.config.hidden_size, init_std=embed_init_std, cast_to=self.forward_dtype)
         self.lm_head      = CastedLinear(self.config.hidden_size, self.config.vocab_size, bias=False)
         # Q head now also consumes full LM output (detached, flattened)
-        self.q_head       = CastedLinear(self.config.hidden_size + self.config.seq_len * self.config.vocab_size, 2, bias=True)
+        # Change from a single linear layer to a small MLP for better capacity
+        q_in_dim = self.config.hidden_size + self.config.seq_len * self.config.vocab_size
+        self.q_head = nn.Sequential(
+            CastedLinear(q_in_dim, self.config.hidden_size, bias=True),
+            nn.SiLU(),
+            CastedLinear(self.config.hidden_size, 2, bias=True),
+        )
 
         self.puzzle_emb_len = -(self.config.puzzle_emb_ndim // -self.config.hidden_size)  if self.config.puzzle_emb_len == 0 else self.config.puzzle_emb_len  # ceil div
         if self.config.puzzle_emb_ndim > 0:
@@ -156,10 +162,12 @@ class TinyRecursiveReasoningModel_ACTV1_Inner(nn.Module):
         self.L_init = nn.Buffer(trunc_normal_init_(torch.empty(self.config.hidden_size, dtype=self.forward_dtype), std=1), persistent=True)
 
         # Q head special init
-        # Init Q to (almost) zero for faster learning during bootstrapping
+        # Init final layer to (almost) zero for faster learning during bootstrapping
         with torch.no_grad():
-            self.q_head.weight.zero_()
-            self.q_head.bias.fill_(-5)  # type: ignore
+            # Zero-out only the last projection so initial outputs are near constant
+            last_linear = self.q_head[-1]
+            last_linear.weight.zero_()
+            last_linear.bias.fill_(-5)  # type: ignore
 
     def _input_embeddings(self, input: torch.Tensor, puzzle_identifiers: torch.Tensor):
         # Token embedding
