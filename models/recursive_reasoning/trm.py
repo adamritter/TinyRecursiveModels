@@ -132,12 +132,10 @@ class TinyRecursiveReasoningModel_ACTV1_Inner(nn.Module):
         # Q head now also consumes full LM output (detached, flattened)
         # Change from a single linear layer to a small MLP for better capacity
         q_in_dim = self.config.hidden_size + self.config.seq_len * self.config.vocab_size
-        self.q_head = nn.Sequential(
-            CastedLinear(q_in_dim, self.config.hidden_size // 16, bias=True),
-            nn.SiLU(),
-            CastedLinear(self.config.hidden_size // 16, 2, bias=True),
-        )
-
+        self.q_head = self.mlp_t = SwiGLU(
+                hidden_size=q_in_dim,  # L
+                expansion=config.expansion,
+            )
         self.puzzle_emb_len = -(self.config.puzzle_emb_ndim // -self.config.hidden_size)  if self.config.puzzle_emb_len == 0 else self.config.puzzle_emb_len  # ceil div
         if self.config.puzzle_emb_ndim > 0:
             # Zero init puzzle embeddings
