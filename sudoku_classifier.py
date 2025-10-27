@@ -200,6 +200,9 @@ if __name__ == "__main__":
         train_bad = rng.integers(low=minv, high=maxv + 1, size=train_labels.shape, dtype=np.int64)
         test_bad = rng.integers(low=minv, high=maxv + 1, size=test_labels.shape, dtype=np.int64)
 
+
+        print(f"Value range for encoding: min={minv}, max={maxv}")
+
         X_train = torch.cat([
             encode_one_hot_flat(train_labels, minv=minv, maxv=maxv),
             encode_one_hot_flat(train_bad, minv=minv, maxv=maxv)
@@ -209,6 +212,8 @@ if __name__ == "__main__":
             torch.zeros(train_bad.shape[0], dtype=torch.float32)
         ], dim=0)
 
+        print("Generating test dataset...")
+
         X_test = torch.cat([
             encode_one_hot_flat(test_labels, minv=minv, maxv=maxv),
             encode_one_hot_flat(test_bad, minv=minv, maxv=maxv)
@@ -217,10 +222,6 @@ if __name__ == "__main__":
             torch.ones(test_labels.shape[0], dtype=torch.float32),
             torch.zeros(test_bad.shape[0], dtype=torch.float32)
         ], dim=0)
-
-        # Shuffle training set
-        perm = torch.randperm(X_train.shape[0])
-        X_train, y_train = X_train[perm], y_train[perm]
 
         print(f"Training samples: {X_train.shape[0]}, Test samples: {X_test.shape[0]}")
 
