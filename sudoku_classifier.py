@@ -186,8 +186,10 @@ if __name__ == "__main__":
             raise FileNotFoundError(f"Could not find labels at {cand1} or {cand2}")
 
         # Load solved sequences as 'good' examples (kept flat)
+        print("Loading dataset from:", args.datapath)
         train_labels = load_labels("train")  # shape (N, L)
         test_labels = load_labels("test")    # shape (M, L)
+        print(f"Train labels shape: {train_labels.shape}, Test labels shape: {test_labels.shape}")
 
         # Determine value range from training set for consistent encoding
         minv = int(train_labels.min())
