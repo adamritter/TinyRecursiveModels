@@ -84,28 +84,28 @@ def get_device():
 
 
 def encode_one_hot_flat(board_array, minv: int = None, maxv: int = None):
-    """One-hot encode flat label arrays.
+    """One-hot encode flat label arrays using PyTorch.
 
     - Accepts shape (N, L) or (L,) with integer values.
     - Uses value range [minv, maxv] mapped to indices [0, C-1], where C = maxv-minv+1.
-    - Returns FloatTensor of shape (N, L*C).
+    - Returns FloatTensor of shape (N, L*C) on CPU.
     """
-    arr = np.array(board_array, dtype=np.int64)
-    if arr.ndim == 1:
-        arr = arr.reshape(1, -1)
+    t = torch.as_tensor(board_array, dtype=torch.long)
+    if t.dim() == 1:
+        t = t.unsqueeze(0)
     else:
-        arr = arr.reshape(arr.shape[0], -1)
+        t = t.reshape(t.size(0), -1)
     if minv is None:
-        minv = int(arr.min())
+        minv = int(t.min().item())
     if maxv is None:
-        maxv = int(arr.max())
+        maxv = int(t.max().item())
     C = maxv - minv + 1
-    idx = arr - minv
-    if (idx < 0).any() or (idx >= C).any():
+    idx = t - minv
+    if idx.min().item() < 0 or idx.max().item() >= C:
         raise ValueError("Values out of expected range after offset. Check minv/maxv or inputs.")
-    one_hot = np.eye(C, dtype=np.float32)[idx]  # (N, L, C)
-    one_hot = one_hot.reshape(arr.shape[0], -1)
-    return torch.from_numpy(one_hot)
+    one_hot = torch.nn.functional.one_hot(idx, num_classes=C).to(dtype=torch.float32)
+    one_hot = one_hot.reshape(t.size(0), -1)
+    return one_hot
 
 
 def test_model(model, X_test, y_test):
