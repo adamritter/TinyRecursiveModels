@@ -220,6 +220,8 @@ if __name__ == "__main__":
         perm = torch.randperm(X_train.shape[0])
         X_train, y_train = X_train[perm], y_train[perm]
 
+        print(f"Training samples: {X_train.shape[0]}, Test samples: {X_test.shape[0]}")
+
         model = train_model(X_train, y_train, X_test, y_test, save=args.save)
     else:
         # Generate synthetic dataset
