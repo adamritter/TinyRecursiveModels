@@ -129,7 +129,8 @@ class TinyRecursiveReasoningModel_ACTV1_Inner(nn.Module):
 
         self.embed_tokens = CastedEmbedding(self.config.vocab_size, self.config.hidden_size, init_std=embed_init_std, cast_to=self.forward_dtype)
         self.lm_head      = CastedLinear(self.config.hidden_size, self.config.vocab_size, bias=False)
-        self.q_head       = CastedLinear(self.config.hidden_size, 2, bias=True)
+        # Q-head consumes a flattened window of 10 positions
+        self.q_head       = CastedLinear(self.config.hidden_size * 10, 2, bias=True)
 
         self.puzzle_emb_len = -(self.config.puzzle_emb_ndim // -self.config.hidden_size)  if self.config.puzzle_emb_len == 0 else self.config.puzzle_emb_len  # ceil div
         if self.config.puzzle_emb_ndim > 0:
@@ -219,7 +220,18 @@ class TinyRecursiveReasoningModel_ACTV1_Inner(nn.Module):
         # LM Outputs
         new_carry = TinyRecursiveReasoningModel_ACTV1InnerCarry(z_H=z_H.detach(), z_L=z_L.detach())  # New carry no grad
         output = self.lm_head(z_H)[:, self.puzzle_emb_len:]
-        q_logits = self.q_head(z_H[:, 0]).to(torch.float32) # Q-head; uses the first puzzle_emb position
+        # Q-head; flatten the first 10 positions (pad with zeros if fewer available)
+        window = 10
+        if self.puzzle_emb_len > 0:
+            first_k = min(self.puzzle_emb_len, window)
+        else:
+            first_k = min(z_H.shape[1], window)
+        selected = z_H[:, :first_k]
+        if first_k < window:
+            pad = torch.zeros((selected.shape[0], window - first_k, selected.shape[2]), dtype=selected.dtype, device=selected.device)
+            selected = torch.cat([selected, pad], dim=1)
+        flat = selected.reshape(selected.shape[0], window * selected.shape[2])
+        q_logits = self.q_head(flat).to(torch.float32)
         return new_carry, output, (q_logits[..., 0], q_logits[..., 1])
 
 
