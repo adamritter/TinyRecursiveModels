@@ -133,9 +133,9 @@ class TinyRecursiveReasoningModel_ACTV1_Inner(nn.Module):
         # Change from a single linear layer to a small MLP for better capacity
         q_in_dim = self.config.hidden_size + self.config.seq_len * self.config.vocab_size
         self.q_head = nn.Sequential(
-            CastedLinear(q_in_dim, self.config.hidden_size // 4, bias=True),
+            CastedLinear(q_in_dim, self.config.hidden_size // 16, bias=True),
             nn.SiLU(),
-            CastedLinear(self.config.hidden_size // 4, 2, bias=True),
+            CastedLinear(self.config.hidden_size // 16, 2, bias=True),
         )
 
         self.puzzle_emb_len = -(self.config.puzzle_emb_ndim // -self.config.hidden_size)  if self.config.puzzle_emb_len == 0 else self.config.puzzle_emb_len  # ceil div
