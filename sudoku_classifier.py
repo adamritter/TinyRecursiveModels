@@ -4,7 +4,6 @@ import argparse
 import torch
 from torch import nn
 from torch.utils.data import DataLoader, TensorDataset
-from torch.nn import functional as F
 import numpy as np
 
 base = 3
@@ -166,119 +165,6 @@ def train_model(X_train, y_train, X_test, y_test, save="sudoku_classifier.pth"):
     return model
 
 
-class FlatSudokuDataset(torch.utils.data.Dataset):
-    """Memory-efficient dataset that streams labels and generates negatives on-the-fly.
-
-    - labels_path: path to .npy file with shape (N, L) of integer tokens.
-    - minv/maxv: inclusive value range used for negatives and one-hot.
-    - include_random_neg: if True, the dataset length is 2*N (positives + random negatives).
-    - seed: base seed to deterministically generate negatives per index.
-    """
-    def __init__(self, labels_path: str, minv: int = None, maxv: int = None,
-                 include_random_neg: bool = True, seed: int = 42):
-        self.labels_np = np.load(labels_path, mmap_mode='r')
-        if self.labels_np.ndim != 2:
-            self.labels_np = self.labels_np.reshape(self.labels_np.shape[0], -1)
-        self.N, self.L = int(self.labels_np.shape[0]), int(self.labels_np.shape[1])
-        self.minv = int(self.labels_np.min()) if minv is None else int(minv)
-        self.maxv = int(self.labels_np.max()) if maxv is None else int(maxv)
-        self.C = self.maxv - self.minv + 1
-        self.include_random_neg = include_random_neg
-        self.seed = int(seed)
-
-    def __len__(self):
-        return self.N * 2 if self.include_random_neg else self.N
-
-    def __getitem__(self, idx):
-        if idx < self.N:
-            x = np.array(self.labels_np[idx], dtype=np.int64)
-            y = 1.0
-        else:
-            ridx = idx - self.N
-            rng = np.random.default_rng(self.seed + ridx)
-            x = rng.integers(self.minv, self.maxv + 1, size=self.L, dtype=np.int64)
-            y = 0.0
-        return torch.as_tensor(x, dtype=torch.long), torch.tensor(y, dtype=torch.float32)
-
-
-def test_model_streaming(model: nn.Module, ds: torch.utils.data.Dataset, batch_size: int = 512) -> float:
-    device = get_device()
-    loader = DataLoader(ds, batch_size=batch_size, shuffle=False)
-    model.eval()
-    correct = 0
-    total = 0
-    with torch.no_grad():
-        for tokens, labels in loader:
-            tokens = tokens.to(device)
-            labels = labels.to(device)
-            # One-hot per batch on device
-            C = getattr(ds, 'C', int(tokens.max().item() - tokens.min().item() + 1))
-            minv = getattr(ds, 'minv', int(tokens.min().item()))
-            idx = tokens - minv
-            one_hot = F.one_hot(idx, num_classes=C).to(torch.float32)
-            x = one_hot.view(tokens.size(0), -1)
-            logits = model(x).squeeze(1)
-            preds = (torch.sigmoid(logits) > 0.5).to(labels.dtype)
-            correct += (preds == labels).sum().item()
-            total += labels.numel()
-    return correct / max(total, 1)
-
-
-def train_model_streaming(train_ds: torch.utils.data.Dataset,
-                          test_ds: torch.utils.data.Dataset,
-                          save: str = "sudoku_classifier.pth",
-                          batch_size: int = 512,
-                          epochs: int = 10,
-                          lr: float = 1e-4):
-    device = get_device()
-    train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True)
-    test_loader = DataLoader(test_ds, batch_size=batch_size, shuffle=False)
-
-    # Infer input dimension from dataset metadata
-    L = getattr(train_ds, 'L')
-    C = getattr(train_ds, 'C')
-    minv = getattr(train_ds, 'minv')
-    input_dim = L * C
-
-    model = nn.Sequential(
-        nn.Linear(input_dim, 256),
-        nn.ReLU(),
-        nn.Linear(256, 128),
-        nn.ReLU(),
-        nn.Linear(128, 1)
-    ).to(device)
-
-    criterion = nn.BCEWithLogitsLoss()
-    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
-
-    for epoch in range(1, epochs + 1):
-        model.train()
-        running = 0.0
-        seen = 0
-        for tokens, labels in train_loader:
-            tokens = tokens.to(device)
-            labels = labels.to(device)
-            optimizer.zero_grad()
-            idx = tokens - minv
-            one_hot = F.one_hot(idx, num_classes=C).to(torch.float32)
-            x = one_hot.view(tokens.size(0), -1)
-            logits = model(x).squeeze(1)
-            loss = criterion(logits, labels)
-            loss.backward()
-            optimizer.step()
-            bsz = tokens.size(0)
-            running += loss.item() * bsz
-            seen += bsz
-        avg_loss = running / max(seen, 1)
-
-        # Eval
-        acc = test_model_streaming(model, test_ds, batch_size=batch_size)
-        print(f"Epoch {epoch:02d} | loss={avg_loss:.4f} | test_acc={acc:.4f}")
-
-    torch.save(model.state_dict(), save)
-    return model
-
-
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--datapath", type=str, default=None, help="Path containing train/ and test/ folders")
@@ -290,22 +176,56 @@ if __name__ == "__main__":
     torch.manual_seed(42)
 
     if args.datapath is not None:
-        def path_labels(split: str):
+        def load_labels(split: str):
             cand1 = os.path.join(args.datapath, split, "all_labels.npy")
             cand2 = os.path.join(args.datapath, split, "all__labels.npy")
             if os.path.exists(cand1):
-                return cand1
+                return np.load(cand1)
             if os.path.exists(cand2):
-                return cand2
+                return np.load(cand2)
             raise FileNotFoundError(f"Could not find labels at {cand1} or {cand2}")
 
+        # Load solved sequences as 'good' examples (kept flat)
         print("Loading dataset from:", args.datapath)
-        train_path = path_labels("train")
-        test_path = path_labels("test")
-        train_ds = FlatSudokuDataset(train_path, include_random_neg=True, seed=42)
-        test_ds = FlatSudokuDataset(test_path, include_random_neg=True, minv=train_ds.minv, maxv=train_ds.maxv, seed=123)
-        print(f"Train size: {len(train_ds)} (pos+neg), Test size: {len(test_ds)} (pos+neg). L={train_ds.L}, C={train_ds.C}")
-        model = train_model_streaming(train_ds, test_ds, save=args.save, batch_size=512, epochs=10, lr=1e-4)
+        train_labels = load_labels("train")  # shape (N, L)
+        test_labels = load_labels("test")    # shape (M, L)
+        print(f"Train labels shape: {train_labels.shape}, Test labels shape: {test_labels.shape}")
+
+        # Determine value range from training set for consistent encoding
+        minv = int(train_labels.min())
+        maxv = int(train_labels.max())
+
+        # Create random 'bad' examples that match shape and value range
+        rng = np.random.default_rng(42)
+        train_bad = rng.integers(low=minv, high=maxv + 1, size=train_labels.shape, dtype=np.int64)
+        test_bad = rng.integers(low=minv, high=maxv + 1, size=test_labels.shape, dtype=np.int64)
+
+
+        print(f"Value range for encoding: min={minv}, max={maxv}")
+
+        X_train = torch.cat([
+            encode_one_hot_flat(train_labels, minv=minv, maxv=maxv),
+            encode_one_hot_flat(train_bad, minv=minv, maxv=maxv)
+        ], dim=0)
+        y_train = torch.cat([
+            torch.ones(train_labels.shape[0], dtype=torch.float32),
+            torch.zeros(train_bad.shape[0], dtype=torch.float32)
+        ], dim=0)
+
+        print("Generating test dataset...")
+
+        X_test = torch.cat([
+            encode_one_hot_flat(test_labels, minv=minv, maxv=maxv),
+            encode_one_hot_flat(test_bad, minv=minv, maxv=maxv)
+        ], dim=0)
+        y_test = torch.cat([
+            torch.ones(test_labels.shape[0], dtype=torch.float32),
+            torch.zeros(test_bad.shape[0], dtype=torch.float32)
+        ], dim=0)
+
+        print(f"Training samples: {X_train.shape[0]}, Test samples: {X_test.shape[0]}")
+
+        model = train_model(X_train, y_train, X_test, y_test, save=args.save)
     else:
         # Generate synthetic dataset
         n = 100000
