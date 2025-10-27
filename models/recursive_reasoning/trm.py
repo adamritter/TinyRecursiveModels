@@ -132,10 +132,9 @@ class TinyRecursiveReasoningModel_ACTV1_Inner(nn.Module):
         # Q head now also consumes full LM output (detached, flattened)
         # Change from a single linear layer to a small MLP for better capacity
         q_in_dim = self.config.hidden_size + self.config.seq_len * self.config.vocab_size
-        self.q_head = self.mlp_t = SwiGLU(
-                hidden_size=q_in_dim,  # L
-                expansion=config.expansion,
-            )
+        self.q_head_fc1 = CastedLinear(q_in_dim, self.config.hidden_size, bias=False)
+        self.q_head_act = nn.SiLU()
+        self.q_head_fc2 = CastedLinear(self.config.hidden_size, 2, bias=False)
         self.puzzle_emb_len = -(self.config.puzzle_emb_ndim // -self.config.hidden_size)  if self.config.puzzle_emb_len == 0 else self.config.puzzle_emb_len  # ceil div
         if self.config.puzzle_emb_ndim > 0:
             # Zero init puzzle embeddings
@@ -163,7 +162,7 @@ class TinyRecursiveReasoningModel_ACTV1_Inner(nn.Module):
         # Init final layer to (almost) zero for faster learning during bootstrapping
         with torch.no_grad():
             # Zero-out only the last projection so initial outputs are near constant
-            last_linear = self.q_head[-1]
+            last_linear = self.q_head_fc2
             last_linear.weight.zero_()
             last_linear.bias.fill_(-5)  # type: ignore
 
@@ -229,7 +228,8 @@ class TinyRecursiveReasoningModel_ACTV1_Inner(nn.Module):
         # Flatten full logits and detach so q_head grads don't affect LM output
         flat_out = output.detach().reshape(output.shape[0], -1)
         q_input = torch.cat([z_H[:, 0], flat_out], dim=-1)
-        q_logits = self.q_head(q_input).to(torch.float32) # Q-head; uses the first puzzle_emb position + flattened logits
+        q_hidden = self.q_head_act(self.q_head_fc1(q_input))
+        q_logits = self.q_head_fc2(q_hidden).to(torch.float32) # Q-head; uses the first puzzle_emb position + flattened logits
         return new_carry, output, (q_logits[..., 0], q_logits[..., 1])
 
 
