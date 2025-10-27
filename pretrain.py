@@ -531,6 +531,7 @@ def evaluate(
                     "q_halt_loss": torch.tensor(0.0, device="cuda"),
                 }
                 print(f" Completed partial-finish inference in {inference_steps} steps")
+                all_finish = True
                 # Debug: list samples where (q_logits >= 0) does not match exact correctness
                 if rank == 0 and q_logits is not None:
                     try:
