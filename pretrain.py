@@ -509,32 +509,70 @@ def evaluate(
 
                 preds = final_preds
                 # Build minimal metrics from finalized predictions (keeps evaluator flow intact)
-                labels = batch.get("labels")
-                if labels is not None and "preds" in preds:
-                    mask_tok = (labels != -100)
-                    valid_counts = mask_tok.sum(-1)
-                    count = (valid_counts > 0).sum()
-                    correct_tok = (preds["preds"] == labels) & mask_tok
-                    frac_correct = torch.where(valid_counts > 0, correct_tok.sum(-1) / valid_counts.clamp_min(1), torch.zeros_like(valid_counts, dtype=torch.float32))
-                    accuracy_sum = frac_correct.sum()
-                    exact = (correct_tok.sum(-1) == valid_counts) & (valid_counts > 0)
-                    exact_sum = exact.sum()
-                    q_logits = preds.get("q_halt_logits")
-                    q_acc = ((q_logits >= 0) == exact).sum() if q_logits is not None else torch.tensor(0, device="cuda")
-                    steps_sum = step_counts.to(torch.float32).sum()
-                    metrics = {
-                        "count": count.to(torch.float32),
-                        "accuracy": accuracy_sum.to(torch.float32),
-                        "exact_accuracy": exact_sum.to(torch.float32),
-                        "q_halt_accuracy": q_acc.to(torch.float32),
-                        "steps": steps_sum,
-                        "lm_loss": torch.tensor(0.0, device="cuda"),
-                        "q_halt_loss": torch.tensor(0.0, device="cuda"),
-                    }
-                else:
-                    raise RuntimeError("Labels not found in batch for partial-finish evaluation.")
-                all_finish = True
+                labels = batch["labels"]
+                mask_tok = (labels != -100)
+                valid_counts = mask_tok.sum(-1)
+                count = (valid_counts > 0).sum()
+                correct_tok = (preds["preds"] == labels) & mask_tok
+                frac_correct = torch.where(valid_counts > 0, correct_tok.sum(-1) / valid_counts.clamp_min(1), torch.zeros_like(valid_counts, dtype=torch.float32))
+                accuracy_sum = frac_correct.sum()
+                exact = (correct_tok.sum(-1) == valid_counts) & (valid_counts > 0)
+                exact_sum = exact.sum()
+                q_logits = preds.get("q_halt_logits")
+                q_acc = ((q_logits >= 0) == exact).sum() if q_logits is not None else torch.tensor(0, device="cuda")
+                steps_sum = step_counts.to(torch.float32).sum()
+                metrics = {
+                    "count": count.to(torch.float32),
+                    "accuracy": accuracy_sum.to(torch.float32),
+                    "exact_accuracy": exact_sum.to(torch.float32),
+                    "q_halt_accuracy": q_acc.to(torch.float32),
+                    "steps": steps_sum,
+                    "lm_loss": torch.tensor(0.0, device="cuda"),
+                    "q_halt_loss": torch.tensor(0.0, device="cuda"),
+                }
                 print(f" Completed partial-finish inference in {inference_steps} steps")
+                # Debug: list samples where (q_logits >= 0) does not match exact correctness
+                if rank == 0 and q_logits is not None:
+                    try:
+                        q_match = (q_logits >= 0)
+                        mism_mask = q_match != exact
+                        mism_indices = torch.nonzero(mism_mask, as_tuple=False).squeeze(-1)
+                        if mism_indices.numel() > 0:
+                            print(f"  q_halt_accuracy mismatches in batch: {mism_indices.numel()}")
+                            # Bring tensors to CPU for readable printing
+                            cpu_inputs = batch["inputs"].detach().cpu()
+                            cpu_labels = labels.detach().cpu()
+                            cpu_preds  = preds["preds"].detach().cpu()
+                            cpu_qlog   = q_logits.detach().cpu()
+                            cpu_valid  = mask_tok.detach().cpu()
+
+                            seq_len = cpu_inputs.shape[1]
+                            side = int(math.isqrt(seq_len))
+                            can_grid = (side * side == seq_len)
+
+                            for bi in mism_indices.tolist():
+                                qv = float(cpu_qlog[bi].item())
+                                valid_mask = cpu_valid[bi]
+                                inp_row = cpu_inputs[bi][valid_mask]
+                                lab_row = cpu_labels[bi][valid_mask]
+                                pred_row = cpu_preds[bi][valid_mask]
+
+                                if can_grid and inp_row.numel() == side * side:
+                                    task_view = inp_row.view(side, side).tolist()
+                                    label_view = lab_row.view(side, side).tolist()
+                                    pred_view = pred_row.view(side, side).tolist()
+                                else:
+                                    task_view = inp_row.tolist()
+                                    label_view = lab_row.tolist()
+                                    pred_view = pred_row.tolist()
+
+                                print(f"  - idx {bi}: q_logit={qv:.4f}")
+                                print(f"    task: {task_view}")
+                                print(f"    real: {label_view}")
+                                print(f"    pred: {pred_view}")
+                    except Exception as e:
+                        print(f"  Warning: failed to print q_halt mismatches: {e}")
+
             else:
                 # Default mode: run full-batch until all_finish is True
                 while True:
