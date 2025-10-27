@@ -3,6 +3,8 @@
 This is a modified codebase of the TRM model (https://github.com/SamsungSAILMontreal/TinyRecursiveModels). It improves the test result on Sudoku Extreme task from 87% to 96%
 by dynamically stopping evaluation and using at most 1024 steps instead of exactly 16 steps at evaluation.
 
+The differences compared to TRM are documented in IMPROVEMENTS.md
+
 It can use the same model that was trained with the original TRM code base using
 
 
@@ -41,7 +43,9 @@ arch.H_cycles=3 arch.L_cycles=6 \
 arch.halt_max_steps=1024
 ```
 
-Where load_checkpoint points to the last checkpoint
+Where load_checkpoint points to the last checkpoint.
+
+
 
 
 # Less is More: Recursive Reasoning with Tiny Networks
