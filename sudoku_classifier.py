@@ -133,7 +133,8 @@ def encode_one_hot_flat(board_array, minv: int = None, maxv: int = None):
     C = maxv - minv + 1
     idx = t - minv
     if idx.min().item() < 0 or idx.max().item() >= C:
-        raise ValueError("Values out of expected range after offset. Check minv/maxv or inputs.")
+        raise ValueError("Values out of expected range after offset. Check minv/maxv or inputs, got values in [{}, {}], expected range [{}, {}].".format(
+            idx.min().item(), idx.max().item(), 0, C - 1))
     return idx
 
 
