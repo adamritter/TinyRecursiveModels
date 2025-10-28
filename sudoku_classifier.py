@@ -236,25 +236,27 @@ if __name__ == "__main__":
 
         # Create random 'bad' examples that match shape and value range
         rng = torch.Generator().manual_seed(42)
-        train_bad = torch.randint(
-            low=minv,
-            high=maxv + 1,
-            size=train_labels.shape,
-            generator=rng,
-            device=train_labels.device,
-            dtype=torch.int64,
-        )
+        train_bad =  torch.cat([
+            modify_random_cell_batch(
+                train_labels,
+                minv=minv,
+                maxv=maxv,
+                generator=rng,
+            ),
+            torch.randint(
+                low=minv,
+                high=maxv + 1,
+                size=train_labels.shape,
+                generator=rng,
+                device=train_labels.device,
+                dtype=torch.int64,
+            ) ], dim=0)
         test_bad = modify_random_cell_batch(
             test_labels,
             minv=minv,
             maxv=maxv,
             generator=rng,
         )
-
-        # print a test_bad example
-        print("Example bad board (test set):")
-        print(test_bad[0].view(9, 9))
-
         print(f"Value range for encoding: min={minv}, max={maxv}")
 
         X_test = torch.cat([
@@ -291,31 +293,22 @@ if __name__ == "__main__":
     else:
         # Generate synthetic dataset
         n = 100000
-        boards = [make_board() for _ in range(n)]
-        bad_boards = [random_sudoku_board() for _ in range(n // 2)] + [modify_random_cell(make_board()) for _ in range(n // 2)]
+        train_good = encode_one_hot_flat([make_board() for _ in range(n)])
+        train_bad = torch.cat([
+            encode_one_hot_flat([random_sudoku_board() for _ in range(n)]),
+            encode_one_hot_flat([modify_random_cell(make_board()) for _ in range(n)])
+        ], dim=0)
 
-        X_good = encode_one_hot_flat(boards)
-        X_bad = encode_one_hot_flat(bad_boards)
-
-        y_good = torch.ones(X_good.shape[0], dtype=torch.float32)
-        y_bad = torch.zeros(X_bad.shape[0], dtype=torch.float32)
-
-        X = torch.cat([X_good, X_bad], dim=0)
-        y = torch.cat([y_good, y_bad], dim=0)
-
-        n_good = len(boards)
-        idx_good_train = slice(0, int(0.8 * n_good))
-        idx_good_test = slice(int(0.8 * n_good), n_good)
-        idx_bad_train = slice(n_good, n_good + int(0.8 * n_good))
-        idx_bad_test = slice(n_good + int(0.8 * n_good), 2 * n_good)
-
-        train_indices = torch.cat([torch.arange(idx_good_train.start, idx_good_train.stop),
-                                   torch.arange(idx_bad_train.start, idx_bad_train.stop)])
-        test_indices = torch.cat([torch.arange(idx_good_test.start, idx_good_test.stop),
-                                  torch.arange(idx_bad_test.start, idx_bad_test.stop)])
-
-        X_train, y_train = X[train_indices], y[train_indices]
-        X_test, y_test = X[test_indices], y[test_indices]
+        X_train = torch.cat([train_good, train_bad], dim=0)
+        y_train = torch.cat([torch.ones(train_good.shape[0], dtype=torch.float32),
+                             torch.zeros(train_bad.shape[0], dtype=torch.float32)], dim=0)
+        test_good = encode_one_hot_flat([make_board() for _ in range(n // 5)])
+        test_bad = torch.cat([
+            encode_one_hot_flat([modify_random_cell(make_board()) for _ in range(n // 5)])
+        ], dim=0)
+        X_test = torch.cat([test_good, test_bad], dim=0)
+        y_test = torch.cat([torch.ones(test_good.shape[0], dtype=torch.float32),
+                             torch.zeros(test_bad.shape[0], dtype=torch.float32)], dim=0)
 
         if args.eval:
             if not os.path.exists(args.eval):
