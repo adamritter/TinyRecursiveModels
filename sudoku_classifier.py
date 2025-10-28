@@ -246,7 +246,7 @@ if __name__ == "__main__":
                     minv=minv,
                     maxv=maxv,
                     generator=rng,
-                )], dim=0),
+                )], dim=1),
             torch.cat([
                 train_inputs,
                 torch.randint(
@@ -256,7 +256,7 @@ if __name__ == "__main__":
                     generator=rng,
                     device=train_labels.device,
                     dtype=torch.int64,
-                ) ], dim=0)
+                ) ], dim=1)
         ], dim=0)
         test_bad = torch.cat([
             test_inputs,
@@ -265,7 +265,7 @@ if __name__ == "__main__":
                 minv=minv,
                 maxv=maxv,
                 generator=rng,
-            )], dim=0)
+            )], dim=1)
         print(f"Value range for encoding: min={minv}, max={maxv}")
         if minv > 1:
             minv = 1
@@ -293,7 +293,7 @@ if __name__ == "__main__":
             print(f"Evaluation accuracy: {acc:.4f}")
         else:
             print("X_train")
-            train_good = encode_one_hot_flat(torch.cat([train_inputs, train_labels], dim=0), minv=minv, maxv=maxv)
+            train_good = encode_one_hot_flat(torch.cat([train_inputs, train_labels], dim=1), minv=minv, maxv=maxv)
             X_train = torch.cat([
                 train_good,
                 encode_one_hot_flat(train_bad, minv=minv, maxv=maxv)
