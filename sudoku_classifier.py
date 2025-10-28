@@ -240,21 +240,22 @@ if __name__ == "__main__":
         train_bad =  torch.cat([
             torch.cat([
                 train_inputs,
-            modify_random_cell_batch(
-                train_labels,
-                minv=minv,
-                maxv=maxv,
-                generator=rng,
-            )], dim=1), torch.cat([
+                modify_random_cell_batch(
+                    train_labels,
+                    minv=minv,
+                    maxv=maxv,
+                    generator=rng,
+                )], dim=0),
+            torch.cat([
                 train_inputs,
-            torch.randint(
-                low=minv,
-                high=maxv + 1,
-                size=train_labels.shape,
-                generator=rng,
-                device=train_labels.device,
-                dtype=torch.int64,
-            ) ], dim=0)
+                torch.randint(
+                    low=minv,
+                    high=maxv + 1,
+                    size=train_labels.shape,
+                    generator=rng,
+                    device=train_labels.device,
+                    dtype=torch.int64,
+                ) ], dim=0)
         ], dim=0)
         test_bad = torch.cat([
             test_inputs,
