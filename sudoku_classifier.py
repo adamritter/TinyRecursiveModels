@@ -251,6 +251,10 @@ if __name__ == "__main__":
             generator=rng,
         )
 
+        # print a test_bad example
+        print("Example bad board (test set):")
+        print(test_bad[0].view(9, 9))
+
         print(f"Value range for encoding: min={minv}, max={maxv}")
 
         X_test = torch.cat([
