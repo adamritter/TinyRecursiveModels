@@ -204,9 +204,23 @@ if __name__ == "__main__":
         maxv = int(train_labels.max())
 
         # Create random 'bad' examples that match shape and value range
-        rng = torch.manual_seed(42)
-        train_bad = rng.integers(low=minv, high=maxv + 1, size=train_labels.shape, dtype=torch.int64)
-        test_bad = rng.integers(low=minv, high=maxv + 1, size=test_labels.shape, dtype=torch.int64)
+        rng = torch.Generator().manual_seed(42)
+        train_bad = torch.randint(
+            low=minv,
+            high=maxv + 1,
+            size=train_labels.shape,
+            generator=rng,
+            device=train_labels.device,
+            dtype=torch.int64,
+        )
+        test_bad = torch.randint(
+            low=minv,
+            high=maxv + 1,
+            size=test_labels.shape,
+            generator=rng,
+            device=test_labels.device,
+            dtype=torch.int64,
+        )
 
         print(f"Value range for encoding: min={minv}, max={maxv}")
 
