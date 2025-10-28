@@ -108,6 +108,19 @@ def encode_one_hot_flat(board_array, minv: int = None, maxv: int = None):
     return one_hot
 
 
+def build_classifier(input_dim, device=None):
+    if device is None:
+        device = get_device()
+    model = nn.Sequential(
+        nn.Linear(input_dim, 100),
+        nn.ReLU(),
+        nn.Linear(100, 100),
+        nn.ReLU(),
+        nn.Linear(100, 1)
+    )
+    return model.to(device)
+
+
 def test_model(model, X_test, y_test):
     device = get_device()
     test_ds = TensorDataset(X_test, y_test)
@@ -134,13 +147,7 @@ def train_model(X_train, y_train, X_test, y_test, save="sudoku_classifier.pth"):
     device = get_device()
 
     input_dim = int(X_train.shape[1])
-    model = nn.Sequential(
-        nn.Linear(input_dim, 100),
-        nn.ReLU(),
-        nn.Linear(100, 100),
-        nn.ReLU(),
-        nn.Linear(100, 1)
-    ).to(device)
+    model = build_classifier(input_dim, device=device)
 
     criterion = nn.BCEWithLogitsLoss()
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
@@ -169,6 +176,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--datapath", type=str, default=None, help="Path containing train/ and test/ folders")
     parser.add_argument("--save", type=str, default="sudoku_classifier.pth", help="Path to save model weights")
+    parser.add_argument("--eval", type=str, default=None, help="Path to model weights to evaluate instead of training")
     args = parser.parse_args()
 
     random.seed(42)
@@ -202,17 +210,6 @@ if __name__ == "__main__":
 
         print(f"Value range for encoding: min={minv}, max={maxv}")
 
-        X_train = torch.cat([
-            encode_one_hot_flat(train_labels, minv=minv, maxv=maxv),
-            encode_one_hot_flat(train_bad, minv=minv, maxv=maxv)
-        ], dim=0)
-        y_train = torch.cat([
-            torch.ones(train_labels.shape[0], dtype=torch.float32),
-            torch.zeros(train_bad.shape[0], dtype=torch.float32)
-        ], dim=0)
-
-        print("Generating test dataset...")
-
         X_test = torch.cat([
             encode_one_hot_flat(test_labels, minv=minv, maxv=maxv),
             encode_one_hot_flat(test_bad, minv=minv, maxv=maxv)
@@ -222,9 +219,28 @@ if __name__ == "__main__":
             torch.zeros(test_bad.shape[0], dtype=torch.float32)
         ], dim=0)
 
-        print(f"Training samples: {X_train.shape[0]}, Test samples: {X_test.shape[0]}")
+        if args.eval:
+            if not os.path.exists(args.eval):
+                raise FileNotFoundError(f"Evaluation weights not found at: {args.eval}")
+            device = get_device()
+            model = build_classifier(int(X_test.shape[1]), device=device)
+            state = torch.load(args.eval, map_location=device)
+            model.load_state_dict(state)
+            acc = test_model(model, X_test, y_test)
+            print(f"Evaluation accuracy: {acc:.4f}")
+        else:
+            X_train = torch.cat([
+                encode_one_hot_flat(train_labels, minv=minv, maxv=maxv),
+                encode_one_hot_flat(train_bad, minv=minv, maxv=maxv)
+            ], dim=0)
+            y_train = torch.cat([
+                torch.ones(train_labels.shape[0], dtype=torch.float32),
+                torch.zeros(train_bad.shape[0], dtype=torch.float32)
+            ], dim=0)
 
-        model = train_model(X_train, y_train, X_test, y_test, save=args.save)
+            print("Generating test dataset...")
+            print(f"Training samples: {X_train.shape[0]}, Test samples: {X_test.shape[0]}")
+            model = train_model(X_train, y_train, X_test, y_test, save=args.save)
     else:
         # Generate synthetic dataset
         n = 100000
@@ -253,4 +269,15 @@ if __name__ == "__main__":
 
         X_train, y_train = X[train_indices], y[train_indices]
         X_test, y_test = X[test_indices], y[test_indices]
-        model = train_model(X_train, y_train, X_test, y_test, save=args.save)
+
+        if args.eval:
+            if not os.path.exists(args.eval):
+                raise FileNotFoundError(f"Evaluation weights not found at: {args.eval}")
+            device = get_device()
+            model = build_classifier(int(X_train.shape[1]), device=device)
+            state = torch.load(args.eval, map_location=device)
+            model.load_state_dict(state)
+            acc = test_model(model, X_test, y_test)
+            print(f"Evaluation accuracy: {acc:.4f}")
+        else:
+            model = train_model(X_train, y_train, X_test, y_test, save=args.save)
