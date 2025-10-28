@@ -140,7 +140,7 @@ def test_model(model, X_test, y_test):
     return acc
 
 
-def train_model(X_train, y_train, X_test, y_test, save="sudoku_classifier.pth"):
+def train_model(X_train, y_train, X_test, y_test, save="sudoku_classifier.pth", epochs=50):
     train_ds = TensorDataset(X_train, y_train)
     train_loader = DataLoader(train_ds, batch_size=1024, shuffle=True)
 
@@ -152,7 +152,6 @@ def train_model(X_train, y_train, X_test, y_test, save="sudoku_classifier.pth"):
     criterion = nn.BCEWithLogitsLoss()
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
 
-    epochs = 50
     for epoch in range(1, epochs + 1):
         model.train()
         total_loss = 0.0
@@ -177,6 +176,7 @@ if __name__ == "__main__":
     parser.add_argument("--datapath", type=str, default=None, help="Path containing train/ and test/ folders")
     parser.add_argument("--save", type=str, default="sudoku_classifier.pth", help="Path to save model weights")
     parser.add_argument("--eval", type=str, default=None, help="Path to model weights to evaluate instead of training")
+    parser.add_argument("--epochs", type=int, default=50, help="Number of training epochs")
     args = parser.parse_args()
 
     random.seed(42)
@@ -254,7 +254,7 @@ if __name__ == "__main__":
 
             print("Generating test dataset...")
             print(f"Training samples: {X_train.shape[0]}, Test samples: {X_test.shape[0]}")
-            model = train_model(X_train, y_train, X_test, y_test, save=args.save)
+            model = train_model(X_train, y_train, X_test, y_test, save=args.save, epochs=args.epochs)
     else:
         # Generate synthetic dataset
         n = 100000
@@ -294,4 +294,4 @@ if __name__ == "__main__":
             acc = test_model(model, X_test, y_test)
             print(f"Evaluation accuracy: {acc:.4f}")
         else:
-            model = train_model(X_train, y_train, X_test, y_test, save=args.save)
+            model = train_model(X_train, y_train, X_test, y_test, save=args.save, epochs=args.epochs)
