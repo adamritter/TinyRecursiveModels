@@ -229,6 +229,9 @@ if __name__ == "__main__":
         test_labels = load_labels("test")    # shape (M, L)
         train_inputs = load_inputs("train")
         test_inputs = load_inputs("test")
+        # Half the training set for faster experiments
+        train_inputs = train_inputs[0:train_inputs.shape[0] // 2]
+        train_labels = train_labels[0:train_labels.shape[0] // 2]
         print(f"Train inputs shape: {train_inputs.shape}, Test inputs shape: {test_inputs.shape}")
         print(f"Train labels shape: {train_labels.shape}, Test labels shape: {test_labels.shape}")
 
