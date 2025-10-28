@@ -269,8 +269,8 @@ if __name__ == "__main__":
         print(f"Value range for encoding: min={minv}, max={maxv}")
         print("X_test")
         X_test = torch.cat([
-            encode_one_hot_flat(torch.cat([test_inputs, test_labels], dim=0), minv=minv, maxv=maxv),
-            encode_one_hot_flat(test_bad, minv=minv, maxv=maxv)
+            encode_one_hot_flat(torch.cat([test_inputs, test_labels], dim=0)),
+            encode_one_hot_flat(test_bad)
         ], dim=0)
         print("y_test")
         y_test = torch.cat([
@@ -292,8 +292,8 @@ if __name__ == "__main__":
         else:
             print("X_train")
             X_train = torch.cat([
-                encode_one_hot_flat(torch.cat([train_inputs, train_labels],), minv=minv, maxv=maxv),
-                encode_one_hot_flat(train_bad, minv=minv, maxv=maxv)
+                encode_one_hot_flat(torch.cat([train_inputs, train_labels],)),
+                encode_one_hot_flat(train_bad)
             ], dim=0)
             print("y_train")
             y_train = torch.cat([
