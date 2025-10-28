@@ -115,11 +115,11 @@ def get_device():
 
 
 def encode_one_hot_flat(board_array, minv: int = None, maxv: int = None):
-    """One-hot encode flat label arrays using PyTorch.
+    """Prepare integer token indices suitable for embedding layers.
 
     - Accepts shape (N, L) or (L,) with integer values.
     - Uses value range [minv, maxv] mapped to indices [0, C-1], where C = maxv-minv+1.
-    - Returns FloatTensor of shape (N, L*C) on CPU.
+    - Returns LongTensor of shape (N, L) on CPU.
     """
     t = torch.as_tensor(board_array, dtype=torch.long)
     if t.dim() == 1:
@@ -134,16 +134,16 @@ def encode_one_hot_flat(board_array, minv: int = None, maxv: int = None):
     idx = t - minv
     if idx.min().item() < 0 or idx.max().item() >= C:
         raise ValueError("Values out of expected range after offset. Check minv/maxv or inputs.")
-    one_hot = torch.nn.functional.one_hot(idx, num_classes=C).to(dtype=torch.float32)
-    one_hot = one_hot.reshape(t.size(0), -1)
-    return one_hot
+    return idx
 
 
-def build_classifier(input_dim, device=None):
+def build_classifier(sequence_length, num_embeddings, embedding_dim=32, device=None):
     if device is None:
         device = get_device()
     model = nn.Sequential(
-        nn.Linear(input_dim, 100, bias=False),
+        nn.Embedding(num_embeddings, embedding_dim),
+        nn.Flatten(),
+        nn.Linear(sequence_length * embedding_dim, 100),
         nn.ReLU(),
         nn.Linear(100, 100),
         nn.ReLU(),
@@ -177,8 +177,10 @@ def train_model(X_train, y_train, X_test, y_test, save="sudoku_classifier.pth", 
 
     device = get_device()
 
-    input_dim = int(X_train.shape[1])
-    model = build_classifier(input_dim, device=device)
+    sequence_length = int(X_train.shape[1])
+    max_token_id = torch.stack([X_train.max(), X_test.max()]).max().item()
+    num_embeddings = int(max_token_id) + 1
+    model = build_classifier(sequence_length, num_embeddings, device=device)
 
     criterion = nn.BCEWithLogitsLoss()
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
@@ -273,7 +275,9 @@ if __name__ == "__main__":
             if not os.path.exists(args.eval):
                 raise FileNotFoundError(f"Evaluation weights not found at: {args.eval}")
             device = get_device()
-            model = build_classifier(int(X_test.shape[1]), device=device)
+            sequence_length = int(X_test.shape[1])
+            num_embeddings = int(X_test.max().item()) + 1
+            model = build_classifier(sequence_length, num_embeddings, device=device)
             state = torch.load(args.eval, map_location=device)
             model.load_state_dict(state)
             acc = test_model(model, X_test, y_test)
@@ -317,7 +321,9 @@ if __name__ == "__main__":
             if not os.path.exists(args.eval):
                 raise FileNotFoundError(f"Evaluation weights not found at: {args.eval}")
             device = get_device()
-            model = build_classifier(int(X_train.shape[1]), device=device)
+            sequence_length = int(X_train.shape[1])
+            num_embeddings = int(torch.stack([X_train.max(), X_test.max()]).max().item()) + 1
+            model = build_classifier(sequence_length, num_embeddings, device=device)
             state = torch.load(args.eval, map_location=device)
             model.load_state_dict(state)
             acc = test_model(model, X_test, y_test)
