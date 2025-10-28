@@ -62,6 +62,8 @@ class TinyRecursiveReasoningModel_ACTV1Config(BaseModel):
     mlp_t: bool = False # use mlp on L instead of transformer
     puzzle_emb_len: int = 16 # if non-zero, its specified to this value
     no_ACT_continue: bool =  True # No continue ACT loss, only use the sigmoid of the halt which makes much more sense
+    halt_pos_and_incorrect: bool = False
+    halt_on_incorrect: bool = False
 
 class TinyRecursiveReasoningModel_ACTV1Block(nn.Module):
     def __init__(self, config: TinyRecursiveReasoningModel_ACTV1Config) -> None:
@@ -303,6 +305,12 @@ class TinyRecursiveReasoningModel_ACTV1(nn.Module):
                     halted = halted | (next_delta_p <= delta_p_halt)
                     outputs["delta_p_halt"] = delta_p_halt
                     outputs["delta_q"] = delta_q
+                elif self.config.pos_or_incorrect or self.config.only_incorrect:
+                    incorrect_mask = (new_current_data["labels"] != new_current_data["inputs"]) | (new_current_data["labels"] == IGNORE_LABEL_ID)
+                    if self.config.halt_on_incorrect:
+                        halted = halted | incorrect_mask.any(dim=1)
+                    elif self.config.halt_pos_and_incorrect:
+                        halted = halted | ((q_halt_logits > 0) & incorrect_mask.any(dim=1))
                 elif self.config.no_ACT_continue:
                     halted = halted | (q_halt_logits > 0)
                 else:
