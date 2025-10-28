@@ -23,21 +23,21 @@ def make_board():
     rows = [g * base + r for g in shuffle(rBase) for r in shuffle(rBase)]
     cols = [g * base + c for g in shuffle(rBase) for c in shuffle(rBase)]
     nums = shuffle(range(1, side + 1))
-    return [[nums[pattern(r, c)] for c in cols] for r in rows]
+    r= [[nums[pattern(r, c)] for c in cols] for r in rows]
+    return [v for row in r for v in row] # flat list
 
 
 def clone_board(b):
-    return [row[:] for row in b]
+    return b[:]
 
 
 def modify_random_cell(b):
-    r = random.randint(0, side - 1)
-    c = random.randint(0, side - 1)
+    r = random.randint(0, len(b)-1)
     v = random.randint(1, 8)
-    if v < b[r][c]:
-        b[r][c] = v
+    if v < b[r]:
+        b[r] = v
     else:
-        b[r][c] = v + 1
+        b[r] = v + 1
     return b
 
 
@@ -72,7 +72,7 @@ def modify_random_cell_batch(boards: torch.Tensor, minv: int = None, maxv: int =
     return clone.view_as(boards)
 
 def random_sudoku_board():
-    return [[random.randint(1, 9) for _ in range(9)] for _ in range(9)]
+    return [random.randint(1, 9) for _ in range(81)]
 
 
 def swap_in_row(b):
