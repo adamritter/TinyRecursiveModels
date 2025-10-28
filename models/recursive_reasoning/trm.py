@@ -64,6 +64,7 @@ class TinyRecursiveReasoningModel_ACTV1Config(BaseModel):
     no_ACT_continue: bool =  True # No continue ACT loss, only use the sigmoid of the halt which makes much more sense
     halt_pos_and_incorrect: bool = False
     halt_on_incorrect: bool = False
+    q_halt_training_logit_limit: float = 0.0  # If set, clamp q_halt_logits to +/- this value
 
 class TinyRecursiveReasoningModel_ACTV1Block(nn.Module):
     def __init__(self, config: TinyRecursiveReasoningModel_ACTV1Config) -> None:
@@ -312,7 +313,7 @@ class TinyRecursiveReasoningModel_ACTV1(nn.Module):
                     elif self.config.halt_pos_and_incorrect:
                         halted = halted | ((q_halt_logits > 0) & incorrect_mask.any(dim=1))
                 elif self.config.no_ACT_continue:
-                    halted = halted | (q_halt_logits > 0)
+                    halted = halted | (q_halt_logits > self.config.q_halt_training_logit_limit)
                 else:
                     halted = halted | (q_halt_logits > q_continue_logits)
 
