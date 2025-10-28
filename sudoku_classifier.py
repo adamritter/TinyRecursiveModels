@@ -40,6 +40,37 @@ def modify_random_cell(b):
         b[r][c] = v + 1
     return b
 
+
+def modify_random_cell_batch(boards: torch.Tensor, minv: int = None, maxv: int = None, generator: torch.Generator = None):
+    """Vectorized variant of modify_random_cell that perturbs one entry per board."""
+    if boards.dim() < 2:
+        raise ValueError("Expected `boards` to have batch dimension (N, ...).")
+
+    clone = boards.clone()
+    batch = clone.shape[0]
+    flat = clone.view(batch, -1)
+
+    if minv is None:
+        minv = int(flat.min().item())
+    if maxv is None:
+        maxv = int(flat.max().item())
+    num_vals = maxv - minv + 1
+    if num_vals < 2:
+        raise ValueError("Need at least two possible values to modify a cell.")
+
+    device = flat.device
+    idx = torch.randint(0, flat.size(1), (batch,), generator=generator, device=device)
+    row_ids = torch.arange(batch, device=device)
+    current = flat[row_ids, idx]
+
+    offsets = torch.randint(0, num_vals - 1, (batch,), generator=generator, device=device)
+    current_offset = current - minv
+    new_offset = offsets + (offsets >= current_offset).to(offsets.dtype)
+    new_values = (new_offset + minv).to(flat.dtype)
+
+    flat[row_ids, idx] = new_values
+    return clone.view_as(boards)
+
 def random_sudoku_board():
     return [[random.randint(1, 9) for _ in range(9)] for _ in range(9)]
 
@@ -213,13 +244,11 @@ if __name__ == "__main__":
             device=train_labels.device,
             dtype=torch.int64,
         )
-        test_bad = torch.randint(
-            low=minv,
-            high=maxv + 1,
-            size=test_labels.shape,
+        test_bad = modify_random_cell_batch(
+            test_labels,
+            minv=minv,
+            maxv=maxv,
             generator=rng,
-            device=test_labels.device,
-            dtype=torch.int64,
         )
 
         print(f"Value range for encoding: min={minv}, max={maxv}")
