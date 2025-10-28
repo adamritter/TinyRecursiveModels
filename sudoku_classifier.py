@@ -143,7 +143,7 @@ def build_classifier(input_dim, device=None):
     if device is None:
         device = get_device()
     model = nn.Sequential(
-        nn.Linear(input_dim, 100),
+        nn.Linear(input_dim, 100, bias=False),
         nn.ReLU(),
         nn.Linear(100, 100),
         nn.ReLU(),
