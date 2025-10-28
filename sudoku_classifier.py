@@ -293,13 +293,14 @@ if __name__ == "__main__":
             print(f"Evaluation accuracy: {acc:.4f}")
         else:
             print("X_train")
+            train_good = encode_one_hot_flat(torch.cat([train_inputs, train_labels], dim=0), minv=minv, maxv=maxv)
             X_train = torch.cat([
-                encode_one_hot_flat(torch.cat([train_inputs, train_labels],), minv=minv, maxv=maxv),
+                train_good,
                 encode_one_hot_flat(train_bad, minv=minv, maxv=maxv)
             ], dim=0)
             print("y_train")
             y_train = torch.cat([
-                torch.ones(train_labels.shape[0], dtype=torch.float32),
+                torch.ones(train_good.shape[0], dtype=torch.float32),
                 torch.zeros(train_bad.shape[0], dtype=torch.float32)
             ], dim=0)
 
