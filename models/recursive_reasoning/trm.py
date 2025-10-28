@@ -305,7 +305,7 @@ class TinyRecursiveReasoningModel_ACTV1(nn.Module):
                     halted = halted | (next_delta_p <= delta_p_halt)
                     outputs["delta_p_halt"] = delta_p_halt
                     outputs["delta_q"] = delta_q
-                elif self.config.pos_or_incorrect or self.config.only_incorrect:
+                elif self.config.halt_pos_and_incorrect or self.config.halt_on_incorrect:
                     incorrect_mask = (new_current_data["labels"] != new_current_data["inputs"]) | (new_current_data["labels"] == IGNORE_LABEL_ID)
                     if self.config.halt_on_incorrect:
                         halted = halted | incorrect_mask.any(dim=1)
