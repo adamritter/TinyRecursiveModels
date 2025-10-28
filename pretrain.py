@@ -95,6 +95,7 @@ class PretrainConfig(pydantic.BaseModel):
     # Optional: if set, use this value instead of the model arch's
     # halt_max_steps to initialize the effective halt step budget.
     iterate_halt_max_steps: Optional[int] = None
+    q_halt_logit_limit: Optional[float] = 0.0  # If set, clamp q_halt_logits to +/- this value
 
 @dataclass
 class TrainState:
@@ -478,7 +479,7 @@ def evaluate(
                         global_alive = global_alive[:0]
                         break
 
-                    finish_mask = (q_vals > 0)
+                    finish_mask = (q_vals > config.q_halt_logit_limit)
                     if t == max_steps - 1:
                         finish_mask = torch.ones_like(finish_mask, dtype=torch.bool)
 
