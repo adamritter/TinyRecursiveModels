@@ -258,11 +258,12 @@ if __name__ == "__main__":
             generator=rng,
         )
         print(f"Value range for encoding: min={minv}, max={maxv}")
-
+        print("X_test")
         X_test = torch.cat([
             encode_one_hot_flat(test_labels, minv=minv, maxv=maxv),
             encode_one_hot_flat(test_bad, minv=minv, maxv=maxv)
         ], dim=0)
+        print("y_test")
         y_test = torch.cat([
             torch.ones(test_labels.shape[0], dtype=torch.float32),
             torch.zeros(test_bad.shape[0], dtype=torch.float32)
@@ -278,10 +279,12 @@ if __name__ == "__main__":
             acc = test_model(model, X_test, y_test)
             print(f"Evaluation accuracy: {acc:.4f}")
         else:
+            print("X_train")
             X_train = torch.cat([
                 encode_one_hot_flat(train_labels, minv=minv, maxv=maxv),
                 encode_one_hot_flat(train_bad, minv=minv, maxv=maxv)
             ], dim=0)
+            print("y_train")
             y_train = torch.cat([
                 torch.ones(train_labels.shape[0], dtype=torch.float32),
                 torch.zeros(train_bad.shape[0], dtype=torch.float32)
