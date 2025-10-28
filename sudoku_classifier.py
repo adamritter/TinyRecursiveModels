@@ -218,18 +218,17 @@ if __name__ == "__main__":
 
     if args.datapath is not None:
         def load_labels(split: str):
-            cand1 = os.path.join(args.datapath, split, "all_labels.npy")
-            cand2 = os.path.join(args.datapath, split, "all__labels.npy")
-            if os.path.exists(cand1):
-                return torch.from_numpy(np.load(cand1))
-            if os.path.exists(cand2):
-                return torch.from_numpy(np.load(cand2))
-            raise FileNotFoundError(f"Could not find labels at {cand1} or {cand2}")
+            return torch.from_numpy(np.load(os.path.join(args.datapath, split, "all__labels.npy")))
+        def load_inputs(split: str):
+            return torch.from_numpy(np.load(os.path.join(args.datapath, split, "all__inputs.npy")))
 
         # Load solved sequences as 'good' examples (kept flat)
         print("Loading dataset from:", args.datapath)
         train_labels = load_labels("train")  # shape (N, L)
         test_labels = load_labels("test")    # shape (M, L)
+        train_inputs = load_inputs("train")
+        test_inputs = load_inputs("test")
+        print(f"Train inputs shape: {train_inputs.shape}, Test inputs shape: {test_inputs.shape}")
         print(f"Train labels shape: {train_labels.shape}, Test labels shape: {test_labels.shape}")
 
         # Determine value range from training set for consistent encoding
@@ -239,12 +238,15 @@ if __name__ == "__main__":
         # Create random 'bad' examples that match shape and value range
         rng = torch.Generator().manual_seed(42)
         train_bad =  torch.cat([
+            torch.cat([
+                train_inputs,
             modify_random_cell_batch(
                 train_labels,
                 minv=minv,
                 maxv=maxv,
                 generator=rng,
-            ),
+            )], dim=1), torch.cat([
+                train_inputs,
             torch.randint(
                 low=minv,
                 high=maxv + 1,
@@ -253,16 +255,19 @@ if __name__ == "__main__":
                 device=train_labels.device,
                 dtype=torch.int64,
             ) ], dim=0)
-        test_bad = modify_random_cell_batch(
-            test_labels,
-            minv=minv,
-            maxv=maxv,
-            generator=rng,
-        )
+        ], dim=0)
+        test_bad = torch.cat([
+            test_inputs,
+            modify_random_cell_batch(
+                test_labels,
+                minv=minv,
+                maxv=maxv,
+                generator=rng,
+            )], dim=1)
         print(f"Value range for encoding: min={minv}, max={maxv}")
         print("X_test")
         X_test = torch.cat([
-            encode_one_hot_flat(test_labels, minv=minv, maxv=maxv),
+            encode_one_hot_flat(torch.cat([test_inputs, test_labels], dim=0), minv=minv, maxv=maxv),
             encode_one_hot_flat(test_bad, minv=minv, maxv=maxv)
         ], dim=0)
         print("y_test")
@@ -285,7 +290,7 @@ if __name__ == "__main__":
         else:
             print("X_train")
             X_train = torch.cat([
-                encode_one_hot_flat(train_labels, minv=minv, maxv=maxv),
+                encode_one_hot_flat(torch.cat([train_inputs, train_labels],), minv=minv, maxv=maxv),
                 encode_one_hot_flat(train_bad, minv=minv, maxv=maxv)
             ], dim=0)
             print("y_train")
