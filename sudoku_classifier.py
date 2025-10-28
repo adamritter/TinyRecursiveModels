@@ -264,7 +264,7 @@ if __name__ == "__main__":
                 minv=minv,
                 maxv=maxv,
                 generator=rng,
-            )], dim=1)
+            )], dim=0)
         print(f"Value range for encoding: min={minv}, max={maxv}")
         print("X_test")
         X_test = torch.cat([
