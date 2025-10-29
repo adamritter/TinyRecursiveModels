@@ -307,9 +307,12 @@ class TinyRecursiveReasoningModel_ACTV1(nn.Module):
                     outputs["delta_p_halt"] = delta_p_halt
                     outputs["delta_q"] = delta_q
                 elif self.config.halt_pos_and_incorrect or self.config.halt_on_correct:
-                    incorrect_mask = new_current_data["labels"] != new_current_data["inputs"]
+                    labels = new_current_data["labels"]
+                    valid_mask = labels != IGNORE_LABEL_ID
+                    preds = torch.argmax(logits, dim=-1)
+                    incorrect_mask = valid_mask & (preds != labels)
                     if self.config.halt_on_correct:
-                        halted = halted |  (~incorrect_mask.any(dim=1))
+                        halted = halted | (~incorrect_mask.any(dim=1))
                     elif self.config.halt_pos_and_incorrect:
                         halted = halted | ((q_halt_logits > 0) & incorrect_mask.any(dim=1))
                 elif self.config.no_ACT_continue:
