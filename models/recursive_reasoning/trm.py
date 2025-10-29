@@ -63,7 +63,7 @@ class TinyRecursiveReasoningModel_ACTV1Config(BaseModel):
     puzzle_emb_len: int = 16 # if non-zero, its specified to this value
     no_ACT_continue: bool =  True # No continue ACT loss, only use the sigmoid of the halt which makes much more sense
     halt_pos_and_incorrect: bool = False
-    halt_on_incorrect: bool = False
+    halt_on_correct: bool = False
     q_halt_training_logit_limit: float = 0.0  # If set, clamp q_halt_logits to +/- this value
 
 class TinyRecursiveReasoningModel_ACTV1Block(nn.Module):
@@ -306,10 +306,10 @@ class TinyRecursiveReasoningModel_ACTV1(nn.Module):
                     halted = halted | (next_delta_p <= delta_p_halt)
                     outputs["delta_p_halt"] = delta_p_halt
                     outputs["delta_q"] = delta_q
-                elif self.config.halt_pos_and_incorrect or self.config.halt_on_incorrect:
-                    incorrect_mask = (new_current_data["labels"] != new_current_data["inputs"]) | (new_current_data["labels"] == IGNORE_LABEL_ID)
-                    if self.config.halt_on_incorrect:
-                        halted = halted | incorrect_mask.any(dim=1)
+                elif self.config.halt_pos_and_incorrect or self.config.halt_on_correct:
+                    incorrect_mask = new_current_data["labels"] != new_current_data["inputs"]
+                    if self.config.halt_on_correct:
+                        halted = halted |  (~incorrect_mask.any(dim=1))
                     elif self.config.halt_pos_and_incorrect:
                         halted = halted | ((q_halt_logits > 0) & incorrect_mask.any(dim=1))
                 elif self.config.no_ACT_continue:
