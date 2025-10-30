@@ -9,7 +9,7 @@ from pysat.solvers import Solver
 from dataset.common import PuzzleDatasetMetadata
 
 
-NUM_VARS = 20
+NUM_VARS = 5
 MCLAUSES = int(4.26 * NUM_VARS)
 TOKENS_PER_FORMULA = MCLAUSES * 3
 SEQ_LEN = TOKENS_PER_FORMULA + 1  # extra column for SAT label
