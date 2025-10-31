@@ -14,7 +14,7 @@ from dataset.common import PuzzleDatasetMetadata
 
 NUM_VARS = 100
 MIN_CLAUSES = int(4.26 * NUM_VARS)
-MCLAUSES = int(6 * NUM_VARS)
+MCLAUSES = int(5 * NUM_VARS)
 TOKENS_PER_FORMULA = MCLAUSES * 3
 SEQ_LEN = TOKENS_PER_FORMULA
 VOCAB_SIZE = 2 * NUM_VARS + 1  # includes PAD token at index 0
