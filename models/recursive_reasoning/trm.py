@@ -61,6 +61,9 @@ class TinyRecursiveReasoningModel_ACTV1Config(BaseModel):
     mlp_t: bool = False # use mlp on L instead of transformer
     puzzle_emb_len: int = 16 # if non-zero, its specified to this value
     no_ACT_continue: bool =  True # No continue ACT loss, only use the sigmoid of the halt which makes much more sense
+    halt_pos_and_correct: bool = False
+    halt_on_correct: bool = False
+    q_halt_training_logit_limit: float = 0.0  # If set, clamp q_halt_logits to +/- this value
 
 class TinyRecursiveReasoningModel_ACTV1Block(nn.Module):
     def __init__(self, config: TinyRecursiveReasoningModel_ACTV1Config) -> None:
@@ -277,8 +280,17 @@ class TinyRecursiveReasoningModel_ACTV1(nn.Module):
                 # Halt signal
                 # NOTE: During evaluation, always use max steps, this is to guarantee the same halting steps inside a batch for batching purposes
                 
-                if self.config.no_ACT_continue:
-                    halted = halted | (q_halt_logits > 0)
+                if self.config.halt_pos_and_correct or self.config.halt_on_correct:
+                    labels = new_current_data["labels"]
+                    valid_mask = labels != IGNORE_LABEL_ID
+                    preds = torch.argmax(logits, dim=-1)
+                    incorrect_mask = valid_mask & (preds != labels)
+                    if self.config.halt_on_correct:
+                        halted = halted | (~incorrect_mask.any(dim=1))
+                    elif self.config.halt_pos_and_correct:
+                        halted = halted | ((q_halt_logits > 0) & (~incorrect_mask.any(dim=1)))
+                elif self.config.no_ACT_continue:
+                    halted = halted | (q_halt_logits > self.config.q_halt_training_logit_limit)
                 else:
                     halted = halted | (q_halt_logits > q_continue_logits)
 
