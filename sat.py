@@ -13,7 +13,8 @@ from dataset.common import PuzzleDatasetMetadata
 
 
 NUM_VARS = 100
-MCLAUSES = int(4.26 * NUM_VARS)
+MIN_CLAUSES = int(4.26 * NUM_VARS)
+MCLAUSES = int(6 * NUM_VARS)
 TOKENS_PER_FORMULA = MCLAUSES * 3
 SEQ_LEN = TOKENS_PER_FORMULA
 VOCAB_SIZE = 2 * NUM_VARS + 1  # includes PAD token at index 0
@@ -26,9 +27,18 @@ class DatasetSplitConfig:
     seed: int
 
 
-def make_rand_3sat(nvars: int, max_clauses: int, batch_size: int, rng: np.random.Generator) -> List[np.ndarray]:
+def make_rand_3sat(
+    nvars: int,
+    min_clauses: int,
+    max_clauses: int,
+    batch_size: int,
+    rng: np.random.Generator,
+) -> List[np.ndarray]:
     """Generate batches of random 3-SAT clause arrays with varied clause counts."""
-    clause_counts = rng.integers(1, max_clauses + 1, size=batch_size, dtype=np.int32)
+    if max_clauses < min_clauses:
+        raise ValueError("max_clauses must be >= min_clauses")
+
+    clause_counts = rng.integers(min_clauses, size=batch_size, dtype=np.int32)
     max_batch_clauses = int(clause_counts.max())
 
     literals = rng.integers(0, 2 * nvars, size=(batch_size, max_batch_clauses, 3), dtype=np.int32)
@@ -69,6 +79,52 @@ def encode_satisfied_literals(clauses: np.ndarray, tokens: np.ndarray, model: Li
     return labels
 
 
+def _model_to_assignment(model: List[int]) -> Dict[int, int]:
+    assignment: Dict[int, int] = {}
+    for lit in model:
+        if lit == 0:
+            continue
+        assignment[abs(lit)] = lit
+    return assignment
+
+
+def find_unique_model(clauses: List[List[int]]) -> Optional[List[int]]:
+    """Mutate clauses to enforce a unique satisfying assignment; return the model or None."""
+    while True:
+        solver = Solver(bootstrap_with=clauses)
+        try:
+            if not solver.solve():
+                return None
+
+            model = solver.get_model()
+            if model is None:
+                return None
+        finally:
+            solver.delete()
+
+        block_clause = [-lit for lit in model if lit != 0]
+        alt_solver = Solver(bootstrap_with=clauses + [block_clause])
+        try:
+            if not alt_solver.solve():
+                return model
+
+            alt_model = alt_solver.get_model()
+            if alt_model is None:
+                return None
+        finally:
+            alt_solver.delete()
+
+        base_assignment = _model_to_assignment(model)
+        alt_assignment = _model_to_assignment(alt_model)
+        differing_vars = [var for var, lit in base_assignment.items() if alt_assignment.get(var) != lit]
+        if not differing_vars:
+            return None
+
+        chosen_lit = base_assignment[differing_vars[0]]
+        # Repeat literal to enforce the unit constraint while keeping 3-SAT clause shape.
+        clauses.append([chosen_lit, chosen_lit, chosen_lit])
+
+
 def _generate_chunk(seed: np.random.SeedSequence, target_examples: int, batch_size: int) -> Tuple[List[np.ndarray], List[np.ndarray], int, int]:
     """Generate a fixed number of SAT examples with a dedicated RNG."""
     rng = np.random.default_rng(seed)
@@ -79,32 +135,28 @@ def _generate_chunk(seed: np.random.SeedSequence, target_examples: int, batch_si
 
     while len(inputs) < target_examples:
         batch_target = max(batch_size, target_examples - len(inputs))
-        batch = make_rand_3sat(NUM_VARS, MCLAUSES, batch_target, rng)
+        batch = make_rand_3sat(NUM_VARS, MIN_CLAUSES, MCLAUSES, batch_target, rng)
         for clauses in batch:
             if len(inputs) >= target_examples:
                 break
 
+            clauses_list = clauses.tolist()
+
+            model = find_unique_model(clauses_list)
+            if model is None:
+                unsat_count += 1
+                continue
+
+            if len(clauses_list) > MCLAUSES:
+                unsat_count += 1
+                continue
+
+            sat_count += 1
+            clauses = np.array(clauses_list, dtype=np.int32)
+            # print(unsat_count / sat_count)
             tokens = encode_clauses(clauses)
-
-            with Solver(bootstrap_with=clauses.tolist()) as solver:
-                if not solver.solve():
-                    unsat_count += 1
-                    continue
-
-                model = solver.get_model()
-                if model is None:
-                    unsat_count += 1
-                    continue
-
-                solver.add_clause([-lit for lit in model if lit != 0])
-                if solver.solve():
-                    # More than one satisfying assignment; skip to enforce uniqueness.
-                    unsat_count += 1
-                    continue
-
-                sat_count += 1
-                labels.append(encode_satisfied_literals(clauses, tokens, model))
-                inputs.append(tokens)
+            labels.append(encode_satisfied_literals(clauses, tokens, model))
+            inputs.append(tokens)
 
     return inputs, labels, sat_count, unsat_count
 
