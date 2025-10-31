@@ -12,10 +12,8 @@ from dataset.common import PuzzleDatasetMetadata
 NUM_VARS = 5
 MCLAUSES = int(4.26 * NUM_VARS)
 TOKENS_PER_FORMULA = MCLAUSES * 3
-SEQ_LEN = TOKENS_PER_FORMULA + 1  # extra column for SAT label
+SEQ_LEN = TOKENS_PER_FORMULA
 VOCAB_SIZE = 2 * NUM_VARS + 1  # includes PAD token at index 0
-FALSE_TOKEN = 1
-TRUE_TOKEN = 2
 
 
 @dataclass(frozen=True)
@@ -38,19 +36,33 @@ def make_rand_3sat(nvars: int, max_clauses: int, batch_size: int, rng: np.random
 
 
 def encode_clauses(clauses: np.ndarray) -> np.ndarray:
-    """Flatten clauses into token sequence with a leading placeholder column."""
+    """Flatten clauses into token sequence."""
     flat = clauses.reshape(-1).astype(np.int32)
-    literal_tokens = np.where(flat > 0, flat, NUM_VARS - flat).astype(np.int32)
-    tokens = np.empty(literal_tokens.size + 1, dtype=np.int32)
-    tokens[0] = 0  # first column reserved for label
-    tokens[1:] = literal_tokens
+    tokens = np.where(flat > 0, flat, NUM_VARS - flat).astype(np.int32)
     return tokens
 
 
-def encode_sat_label(is_sat: bool, tokens: np.ndarray) -> np.ndarray:
-    """Copy input tokens, marking satisfiability in the first position."""
-    labels = tokens.copy()
-    labels[0] = TRUE_TOKEN if is_sat else FALSE_TOKEN
+def encode_satisfied_literals(clauses: np.ndarray, tokens: np.ndarray, model: List[int]) -> np.ndarray:
+    """Return tokens for literals satisfied by the solver assignment; unsatisfied entries are zero."""
+    assignment = np.zeros(NUM_VARS + 1, dtype=np.bool_)
+    for lit in model:
+        if lit == 0:
+            continue
+        var = abs(lit)
+        if var <= NUM_VARS:
+            assignment[var] = lit > 0
+
+    flat_clauses = clauses.reshape(-1)
+    satisfied_mask = np.zeros(flat_clauses.size, dtype=np.bool_)
+    for idx, lit in enumerate(flat_clauses):
+        var = abs(lit)
+        if var == 0:
+            continue
+        value = assignment[var]
+        satisfied_mask[idx] = value if lit > 0 else (not value)
+
+    labels = np.zeros_like(tokens, dtype=np.int32)
+    labels[satisfied_mask] = tokens[satisfied_mask]
     return labels
 
 
@@ -73,17 +85,25 @@ def generate_examples(num_examples: int, rng: np.random.Generator) -> Dict[str, 
             tokens = encode_clauses(clauses)
 
             with Solver(bootstrap_with=clauses.tolist()) as solver:
-                is_sat = solver.solve()
-                if is_sat:
-                    sat_count += 1
-                else:
+                if not solver.solve():
                     unsat_count += 1
+                    continue
 
-            labels.append(encode_sat_label(is_sat, tokens))
-            inputs.append(tokens)
+                model = solver.get_model()
+                if model is None:
+                    unsat_count += 1
+                    continue
 
-            puzzle_identifiers.append(0)
+                solver.add_clause([-lit for lit in model if lit != 0])
+                if solver.solve():
+                    # More than one satisfying assignment; skip to enforce uniqueness.
+                    unsat_count += 1
+                    continue
 
+                sat_count += 1
+                labels.append(encode_satisfied_literals(clauses, tokens, model))
+                inputs.append(tokens)
+                puzzle_identifiers.append(0)
     pad_length = SEQ_LEN
     if any(example.shape[0] > pad_length for example in inputs):
         raise ValueError("Encountered sequence longer than configured SEQ_LEN.")
@@ -148,7 +168,7 @@ def save_dataset(root: Path, split: DatasetSplitConfig, data: Dict[str, np.ndarr
 def main() -> None:
     output_root = Path("sat_examples")
     splits = [
-        DatasetSplitConfig(name="train", num_examples=2000000, seed=17),
+        DatasetSplitConfig(name="train", num_examples=20000, seed=17),
         DatasetSplitConfig(name="test", num_examples=50000, seed=23),
     ]
 
