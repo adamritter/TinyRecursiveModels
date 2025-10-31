@@ -1,7 +1,10 @@
 import json
+import math
+import os
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 from pysat.solvers import Solver
@@ -9,7 +12,7 @@ from pysat.solvers import Solver
 from dataset.common import PuzzleDatasetMetadata
 
 
-NUM_VARS = 20
+NUM_VARS = 100
 MCLAUSES = int(4.26 * NUM_VARS)
 TOKENS_PER_FORMULA = MCLAUSES * 3
 SEQ_LEN = TOKENS_PER_FORMULA
@@ -66,20 +69,19 @@ def encode_satisfied_literals(clauses: np.ndarray, tokens: np.ndarray, model: Li
     return labels
 
 
-def generate_examples(num_examples: int, rng: np.random.Generator) -> Dict[str, np.ndarray]:
+def _generate_chunk(seed: np.random.SeedSequence, target_examples: int, batch_size: int) -> Tuple[List[np.ndarray], List[np.ndarray], int, int]:
+    """Generate a fixed number of SAT examples with a dedicated RNG."""
+    rng = np.random.default_rng(seed)
     inputs: List[np.ndarray] = []
     labels: List[np.ndarray] = []
-    puzzle_identifiers = []
-
-    batch_size = 256
-
     sat_count = 0
     unsat_count = 0
 
-    while len(inputs) < num_examples:
-        batch = make_rand_3sat(NUM_VARS, MCLAUSES, max(batch_size, num_examples - len(inputs)), rng)
+    while len(inputs) < target_examples:
+        batch_target = max(batch_size, target_examples - len(inputs))
+        batch = make_rand_3sat(NUM_VARS, MCLAUSES, batch_target, rng)
         for clauses in batch:
-            if len(inputs) >= num_examples:
+            if len(inputs) >= target_examples:
                 break
 
             tokens = encode_clauses(clauses)
@@ -101,11 +103,101 @@ def generate_examples(num_examples: int, rng: np.random.Generator) -> Dict[str, 
                     continue
 
                 sat_count += 1
-                if sat_count % 1000 == 0:
-                    print(f"Generated {sat_count} SAT examples...")
                 labels.append(encode_satisfied_literals(clauses, tokens, model))
                 inputs.append(tokens)
-                puzzle_identifiers.append(0)
+
+    return inputs, labels, sat_count, unsat_count
+
+
+def _print_progress(previous: int, current: int) -> None:
+    """Emit progress updates when reaching 1k SAT milestones."""
+    start = previous // 1000
+    end = current // 1000
+    for milestone in range(start + 1, end + 1):
+        print(f"Generated {milestone * 1000} SAT examples...")
+
+
+def generate_examples(
+    num_examples: int,
+    seed: int,
+    num_workers: Optional[int] = None,
+    chunk_size: int = 512,
+) -> Tuple[Dict[str, np.ndarray], int, int]:
+    """Generate SAT dataset examples using multi-process workers."""
+    if num_examples <= 0:
+        empty = np.zeros((0, SEQ_LEN), dtype=np.int32)
+        data = {
+            "inputs": empty,
+            "labels": empty,
+            "puzzle_identifiers": empty,
+            "puzzle_indices": np.arange(1, dtype=np.int32),
+            "group_indices": np.arange(1, dtype=np.int32),
+        }
+        return data, 0, 0
+
+    worker_count = num_workers or (os.cpu_count() or 1)
+    worker_count = max(1, worker_count)
+
+    chunk_size = max(1, min(chunk_size, num_examples))
+    num_chunks = math.ceil(num_examples / chunk_size)
+    seed_sequence = np.random.SeedSequence(seed)
+    child_seeds = seed_sequence.spawn(num_chunks + 1)
+    worker_seeds = child_seeds[:-1]
+    permutation_seed = child_seeds[-1]
+
+    chunk_sizes = [chunk_size] * num_chunks
+    remainder = num_examples - chunk_size * (num_chunks - 1)
+    if num_chunks > 0:
+        chunk_sizes[-1] = remainder
+
+    inputs: List[np.ndarray] = []
+    labels: List[np.ndarray] = []
+    sat_count = 0
+    unsat_count = 0
+    batch_size = 256
+
+    def handle_chunk(result: Tuple[List[np.ndarray], List[np.ndarray], int, int]) -> None:
+        nonlocal inputs, labels, sat_count, unsat_count
+        chunk_inputs, chunk_labels, chunk_sat, chunk_unsat = result
+        previous_sat = sat_count
+        sat_count += chunk_sat
+        unsat_count += chunk_unsat
+        _print_progress(previous_sat, sat_count)
+        inputs.extend(chunk_inputs)
+        labels.extend(chunk_labels)
+
+    max_workers = min(worker_count, num_chunks)
+
+    if max_workers <= 1:
+        for seed_item, target in zip(worker_seeds, chunk_sizes):
+            handle_chunk(_generate_chunk(seed_item, target, batch_size))
+    else:
+        chunk_iter = iter(zip(worker_seeds, chunk_sizes))
+
+        def submit_next(pending: Dict) -> None:
+            try:
+                seed_item, target = next(chunk_iter)
+            except StopIteration:
+                return
+            future = executor.submit(_generate_chunk, seed_item, target, batch_size)
+            pending[future] = None
+
+        with ProcessPoolExecutor(max_workers=max_workers) as executor:
+            pending: Dict = {}
+            for _ in range(max_workers):
+                submit_next(pending)
+
+            while pending:
+                for future in as_completed(pending):
+                    pending.pop(future)
+                    handle_chunk(future.result())
+                    submit_next(pending)
+                    break
+
+    if len(inputs) > num_examples:
+        inputs = inputs[:num_examples]
+        labels = labels[:num_examples]
+
     pad_length = SEQ_LEN
     if any(example.shape[0] > pad_length for example in inputs):
         raise ValueError("Encountered sequence longer than configured SEQ_LEN.")
@@ -118,10 +210,11 @@ def generate_examples(num_examples: int, rng: np.random.Generator) -> Dict[str, 
 
     for idx, label in enumerate(labels):
         labels_arr[idx, : label.shape[0]] = label
-    puzzle_identifiers_arr = np.array(puzzle_identifiers, dtype=np.int32)
+
+    puzzle_identifiers_arr = np.zeros((len(inputs),), dtype=np.int32)
 
     num_examples = inputs_arr.shape[0]
-    permutation = rng.permutation(num_examples)
+    permutation = np.random.default_rng(permutation_seed).permutation(num_examples)
 
     inputs_arr = inputs_arr[permutation]
     labels_arr = labels_arr[permutation]
@@ -175,8 +268,7 @@ def main() -> None:
     ]
 
     for split in splits:
-        rng = np.random.default_rng(split.seed)
-        data, sat_count, unsat_count = generate_examples(split.num_examples, rng)
+        data, sat_count, unsat_count = generate_examples(split.num_examples, split.seed)
         save_dataset(output_root, split, data)
         print(
             f"Wrote {split.num_examples} {split.name} examples to {output_root / split.name} "
