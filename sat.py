@@ -101,6 +101,8 @@ def generate_examples(num_examples: int, rng: np.random.Generator) -> Dict[str, 
                     continue
 
                 sat_count += 1
+                if sat_count % 1000 == 0:
+                    print(f"Generated {sat_count} SAT examples...")
                 labels.append(encode_satisfied_literals(clauses, tokens, model))
                 inputs.append(tokens)
                 puzzle_identifiers.append(0)
@@ -168,8 +170,8 @@ def save_dataset(root: Path, split: DatasetSplitConfig, data: Dict[str, np.ndarr
 def main() -> None:
     output_root = Path("sat_examples")
     splits = [
-        DatasetSplitConfig(name="train", num_examples=200000, seed=17),
-        DatasetSplitConfig(name="test", num_examples=50000, seed=23),
+        DatasetSplitConfig(name="train", num_examples=50000, seed=17),
+        DatasetSplitConfig(name="test", num_examples=20000, seed=23),
     ]
 
     for split in splits:
