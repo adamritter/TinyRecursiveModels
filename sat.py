@@ -168,7 +168,7 @@ def save_dataset(root: Path, split: DatasetSplitConfig, data: Dict[str, np.ndarr
 def main() -> None:
     output_root = Path("sat_examples")
     splits = [
-        DatasetSplitConfig(name="train", num_examples=2000000, seed=17),
+        DatasetSplitConfig(name="train", num_examples=200000, seed=17),
         DatasetSplitConfig(name="test", num_examples=50000, seed=23),
     ]
 
