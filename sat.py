@@ -11,13 +11,16 @@ from pysat.solvers import Solver
 
 from dataset.common import PuzzleDatasetMetadata
 
-
-NUM_VARS = 100
+NUM_VARS = 150
+TRAIN_NUM_EXAMPLES = 5000
+TEST_NUM_EXAMPLES = 2000
+TRAIN_NUM_VARS_USED = None
 MIN_CLAUSES = int(4.26 * NUM_VARS)
 MCLAUSES = int(5 * NUM_VARS)
 TOKENS_PER_FORMULA = MCLAUSES * 3
 SEQ_LEN = TOKENS_PER_FORMULA
 VOCAB_SIZE = 2 * NUM_VARS + 1  # includes PAD token at index 0
+CHUNK_SIZE = 25
 
 
 @dataclass(frozen=True)
@@ -25,27 +28,58 @@ class DatasetSplitConfig:
     name: str
     num_examples: int
     seed: int
+    nvars_used: Optional[int] = None
+
+
+def _remap_instance_literals_and_model(
+    clauses: np.ndarray,
+    model: List[int],
+    rng: np.random.Generator,
+    nvars: int,
+    base_nvars: int,
+) -> Tuple[np.ndarray, List[int]]:
+    """Remap a single clause array and its model onto randomly chosen global variables."""
+    if clauses.size == 0:
+        return clauses, model
+
+    mapping = np.empty(base_nvars + 1, dtype=np.int32)
+    mapping[0] = 0
+    mapping[1:] = rng.choice(nvars, size=base_nvars, replace=False) + 1
+
+    abs_clauses = np.abs(clauses)
+    mapped_abs = mapping[abs_clauses]
+    clause_signs = np.where(clauses > 0, 1, -1)
+    remapped_clauses = (mapped_abs * clause_signs).astype(np.int32, copy=False)
+
+    if model:
+        model_array = np.asarray(model, dtype=np.int32)
+        zero_mask = model_array == 0
+        model_abs = np.abs(model_array)
+        mapped_model_abs = mapping[model_abs]
+        model_signs = np.where(model_array > 0, 1, -1)
+        remapped_model_array = mapped_model_abs * model_signs
+        remapped_model_array[zero_mask] = 0
+        remapped_model = remapped_model_array.tolist()
+    else:
+        remapped_model = model
+
+    return remapped_clauses, remapped_model
 
 
 def make_rand_3sat(
     nvars: int,
-    min_clauses: int,
-    max_clauses: int,
-    batch_size: int,
+    num_clauses: int,
     rng: np.random.Generator,
-) -> List[np.ndarray]:
-    """Generate batches of random 3-SAT clause arrays with varied clause counts."""
-    if max_clauses < min_clauses:
-        raise ValueError("max_clauses must be >= min_clauses")
+) -> List[List[int]]:
+    """Generate a single random 3-SAT instance expressed as a clause list."""
+    if num_clauses <= 0:
+        raise ValueError("num_clauses must be positive")
 
-    clause_counts = rng.integers(min_clauses, size=batch_size, dtype=np.int32)
-    max_batch_clauses = int(clause_counts.max())
-
-    literals = rng.integers(0, 2 * nvars, size=(batch_size, max_batch_clauses, 3), dtype=np.int32)
+    literals = rng.integers(0, 2 * nvars, size=(num_clauses, 3), dtype=np.int32)
     literals -= nvars
     literals += 1 + (literals >> 31)
 
-    return [literals[idx, :count].copy() for idx, count in enumerate(clause_counts)]
+    return literals.tolist()
 
 
 def encode_clauses(clauses: np.ndarray) -> np.ndarray:
@@ -125,7 +159,12 @@ def find_unique_model(clauses: List[List[int]]) -> Optional[List[int]]:
         clauses.append([chosen_lit, chosen_lit, chosen_lit])
 
 
-def _generate_chunk(seed: np.random.SeedSequence, target_examples: int, batch_size: int) -> Tuple[List[np.ndarray], List[np.ndarray], int, int]:
+def _generate_chunk(
+    seed: np.random.SeedSequence,
+    target_examples: int,
+    num_clauses: int,
+    nvars_used: Optional[int],
+) -> Tuple[List[np.ndarray], List[np.ndarray], int, int]:
     """Generate a fixed number of SAT examples with a dedicated RNG."""
     rng = np.random.default_rng(seed)
     inputs: List[np.ndarray] = []
@@ -133,30 +172,33 @@ def _generate_chunk(seed: np.random.SeedSequence, target_examples: int, batch_si
     sat_count = 0
     unsat_count = 0
 
+    nvars = NUM_VARS if nvars_used is None else nvars_used
+    num_clauses = int(4.26 * nvars)
+
     while len(inputs) < target_examples:
-        batch_target = max(batch_size, target_examples - len(inputs))
-        batch = make_rand_3sat(NUM_VARS, MIN_CLAUSES, MCLAUSES, batch_target, rng)
-        for clauses in batch:
-            if len(inputs) >= target_examples:
-                break
+        clauses_list = make_rand_3sat(nvars, num_clauses, rng)
+        model = find_unique_model(clauses_list)
+        if model is None or len(clauses_list) > MCLAUSES:
+            unsat_count += 1
+            continue
 
-            clauses_list = clauses.tolist()
+        sat_count += 1
+        clauses_arr = np.array(clauses_list, dtype=np.int32)
 
-            model = find_unique_model(clauses_list)
-            if model is None:
-                unsat_count += 1
-                continue
+        if nvars_used is not None and nvars_used < NUM_VARS:
+            clauses_arr, model = _remap_instance_literals_and_model(
+                clauses_arr,
+                model,
+                rng,
+                NUM_VARS,
+                nvars_used,
+            )
 
-            if len(clauses_list) > MCLAUSES:
-                unsat_count += 1
-                continue
-
-            sat_count += 1
-            clauses = np.array(clauses_list, dtype=np.int32)
-            # print(unsat_count / sat_count)
-            tokens = encode_clauses(clauses)
-            labels.append(encode_satisfied_literals(clauses, tokens, model))
-            inputs.append(tokens)
+        tokens = encode_clauses(clauses_arr)
+        labels.append(encode_satisfied_literals(clauses_arr, tokens, model))
+        inputs.append(tokens)
+        if len(inputs) >= target_examples:
+            break
 
     return inputs, labels, sat_count, unsat_count
 
@@ -173,7 +215,9 @@ def generate_examples(
     num_examples: int,
     seed: int,
     num_workers: Optional[int] = None,
-    chunk_size: int = 512,
+    chunk_size: int = CHUNK_SIZE,
+    num_clauses: int = MIN_CLAUSES,
+    nvars_used: Optional[int] = None,
 ) -> Tuple[Dict[str, np.ndarray], int, int]:
     """Generate SAT dataset examples using multi-process workers."""
     if num_examples <= 0:
@@ -206,8 +250,6 @@ def generate_examples(
     labels: List[np.ndarray] = []
     sat_count = 0
     unsat_count = 0
-    batch_size = 256
-
     def handle_chunk(result: Tuple[List[np.ndarray], List[np.ndarray], int, int]) -> None:
         nonlocal inputs, labels, sat_count, unsat_count
         chunk_inputs, chunk_labels, chunk_sat, chunk_unsat = result
@@ -222,7 +264,7 @@ def generate_examples(
 
     if max_workers <= 1:
         for seed_item, target in zip(worker_seeds, chunk_sizes):
-            handle_chunk(_generate_chunk(seed_item, target, batch_size))
+            handle_chunk(_generate_chunk(seed_item, target, num_clauses, nvars_used))
     else:
         chunk_iter = iter(zip(worker_seeds, chunk_sizes))
 
@@ -231,7 +273,13 @@ def generate_examples(
                 seed_item, target = next(chunk_iter)
             except StopIteration:
                 return
-            future = executor.submit(_generate_chunk, seed_item, target, batch_size)
+            future = executor.submit(
+                _generate_chunk,
+                seed_item,
+                target,
+                num_clauses,
+                nvars_used,
+            )
             pending[future] = None
 
         with ProcessPoolExecutor(max_workers=max_workers) as executor:
@@ -257,11 +305,28 @@ def generate_examples(
     inputs_arr = np.zeros((len(inputs), pad_length), dtype=np.int32)
     labels_arr = np.zeros((len(labels), pad_length), dtype=np.int32)
 
-    for idx, example in enumerate(inputs):
-        inputs_arr[idx, : example.shape[0]] = example
+    triplet_rng = np.random.default_rng(permutation_seed)
+    total_triplet_slots = SEQ_LEN // 3
+    for idx, (example, label) in enumerate(zip(inputs, labels)):
+        example_len = example.shape[0]
+        label_len = label.shape[0]
+        if label_len != example_len:
+            raise ValueError("Input and label lengths must match.")
 
-    for idx, label in enumerate(labels):
-        labels_arr[idx, : label.shape[0]] = label
+        if example_len and example_len % 3 != 0:
+            raise ValueError("Example length must be divisible by 3.")
+
+        if example_len:
+            clause_count = example_len // 3
+            if clause_count > total_triplet_slots:
+                raise ValueError("Clause count exceeds available triplet slots.")
+
+            clause_perm = triplet_rng.permutation(total_triplet_slots)[:clause_count]
+            example_triplets = example.reshape(clause_count, 3)
+            label_triplets = label.reshape(clause_count, 3)
+
+            inputs_arr[idx].reshape(total_triplet_slots, 3)[clause_perm] = example_triplets
+            labels_arr[idx].reshape(total_triplet_slots, 3)[clause_perm] = label_triplets
 
     puzzle_identifiers_arr = np.zeros((len(inputs),), dtype=np.int32)
 
@@ -315,12 +380,21 @@ def save_dataset(root: Path, split: DatasetSplitConfig, data: Dict[str, np.ndarr
 def main() -> None:
     output_root = Path("sat_examples")
     splits = [
-        DatasetSplitConfig(name="train", num_examples=50000, seed=17),
-        DatasetSplitConfig(name="test", num_examples=20000, seed=23),
+        DatasetSplitConfig(
+            name="train",
+            num_examples=TRAIN_NUM_EXAMPLES,
+            seed=17,
+            nvars_used=TRAIN_NUM_VARS_USED,
+        ),
+        DatasetSplitConfig(name="test", num_examples=TEST_NUM_EXAMPLES, seed=23),
     ]
 
     for split in splits:
-        data, sat_count, unsat_count = generate_examples(split.num_examples, split.seed)
+        data, sat_count, unsat_count = generate_examples(
+            split.num_examples,
+            split.seed,
+            nvars_used=split.nvars_used,
+        )
         save_dataset(output_root, split, data)
         print(
             f"Wrote {split.num_examples} {split.name} examples to {output_root / split.name} "
