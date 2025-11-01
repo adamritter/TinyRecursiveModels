@@ -38,7 +38,7 @@ def make_rand_3sat(
     if max_clauses < min_clauses:
         raise ValueError("max_clauses must be >= min_clauses")
 
-    clause_counts = rng.integers(min_clauses, size=batch_size, dtype=np.int32)
+    clause_counts = rng.integers(min_clauses, max_clauses + 1, size=batch_size, dtype=np.int32)
     max_batch_clauses = int(clause_counts.max())
 
     literals = rng.integers(0, 2 * nvars, size=(batch_size, max_batch_clauses, 3), dtype=np.int32)
