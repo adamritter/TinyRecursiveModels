@@ -14,7 +14,7 @@ from dataset.common import PuzzleDatasetMetadata
 NUM_VARS = 150
 TRAIN_NUM_EXAMPLES = 50000
 TEST_NUM_EXAMPLES = 100
-TRAIN_NUM_VARS_USED = 75
+TRAIN_NUM_VARS_USED = 150
 MIN_CLAUSES = int(4.26 * NUM_VARS)
 MCLAUSES = int(5 * NUM_VARS)
 TOKENS_PER_FORMULA = MCLAUSES * 3
@@ -401,8 +401,9 @@ def main() -> None:
             num_examples=TRAIN_NUM_EXAMPLES,
             seed=17,
             nvars_used=TRAIN_NUM_VARS_USED,
+            unique=False,
         ),
-        DatasetSplitConfig(name="test", num_examples=TEST_NUM_EXAMPLES, seed=23),
+        DatasetSplitConfig(name="test", num_examples=TEST_NUM_EXAMPLES, seed=23, unique=False),
     ]
 
     for split in splits:
