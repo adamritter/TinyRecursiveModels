@@ -5,18 +5,20 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
+import subprocess
+import tempfile
 
 import numpy as np
 from pysat.solvers import Solver
 
 from dataset.common import PuzzleDatasetMetadata
 
-NUM_VARS = 150
+NUM_VARS = 300
 TRAIN_NUM_EXAMPLES = 50000
 TEST_NUM_EXAMPLES = 100
-TRAIN_NUM_VARS_USED = 150
+TRAIN_NUM_VARS_USED = None
 MIN_CLAUSES = int(4.26 * NUM_VARS)
-MCLAUSES = int(5 * NUM_VARS)
+MCLAUSES = int(math.ceil(5.5 * NUM_VARS))
 TOKENS_PER_FORMULA = MCLAUSES * 3
 SEQ_LEN = TOKENS_PER_FORMULA
 VOCAB_SIZE = 2 * NUM_VARS + 1  # includes PAD token at index 0
@@ -30,6 +32,7 @@ class DatasetSplitConfig:
     seed: int
     nvars_used: Optional[int] = None
     unique: bool = True
+    planted: bool = False
 
 
 def _remap_instance_literals_and_model(
@@ -81,6 +84,46 @@ def make_rand_3sat(
     literals += 1 + (literals >> 31)
 
     return literals.tolist()
+
+
+def make_planted_rand_3sat(
+    nvars: int,
+    rng: np.random.Generator,
+    alpha: float = 5.4,
+) -> Tuple[List[List[int]], List[int]]:
+    """Generate a random 3-SAT instance with a planted solution, returning clauses and the solution."""
+    if alpha <= 0:
+        raise ValueError("alpha must be positive")
+
+    planted_assignment = rng.choice([-1, 1], size=nvars).astype(np.int32)
+    total_clauses = max(1, int(alpha * nvars))
+
+    clauses: List[List[int]] = []
+    for _ in range(total_clauses):
+        vars_sample = rng.choice(nvars, size=3, replace=False)
+        clause: List[int] = []
+        satisfied = False
+        for var_idx in vars_sample:
+            var = var_idx + 1
+            sign = planted_assignment[var_idx]
+            # Flip sign with probability 0.5 to allow both satisfied and unsatisfied literals.
+            if rng.random() < 0.5:
+                sign = -sign
+            literal = var if sign > 0 else -var
+            clause.append(literal)
+            if planted_assignment[var_idx] == (1 if literal > 0 else -1):
+                satisfied = True
+
+        if not satisfied:
+            flip_idx = rng.integers(3)
+            var_idx = vars_sample[flip_idx]
+            clause[flip_idx] = vars_sample[flip_idx] + 1 if planted_assignment[var_idx] > 0 else -(vars_sample[flip_idx] + 1)
+
+        clauses.append(clause)
+
+    planted_model = [idx if sign > 0 else -idx for idx, sign in enumerate(planted_assignment, start=1)]
+
+    return clauses, planted_model
 
 
 def encode_clauses(clauses: np.ndarray) -> np.ndarray:
@@ -135,31 +178,75 @@ def find_any_model(clauses: List[List[int]]) -> Optional[List[int]]:
         solver.delete()
 
 
+def cadical_solve(clauses: List[List[int]]) -> Optional[List[int]]:
+    """Solve CNF via external cadical; return a model or None if UNSAT."""
+    if not clauses:
+        return []
+
+    max_var = 0
+    for clause in clauses:
+        for lit in clause:
+            max_var = max(max_var, abs(lit))
+
+    if max_var == 0:
+        return []
+
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".cnf", delete=False) as cnf_file:
+        cnf_path = cnf_file.name
+        cnf_file.write(f"p cnf {max_var} {len(clauses)}\n")
+        for clause in clauses:
+            cnf_file.write(" ".join(str(lit) for lit in clause) + " 0\n")
+        cnf_file.flush()
+
+    try:
+        try:
+            result = subprocess.run(
+                ["cadical", "-q", cnf_path],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+        except FileNotFoundError as err:
+            raise RuntimeError("cadical binary not found in PATH") from err
+
+        if result.returncode not in (10, 20):
+            raise RuntimeError(
+                f"cadical returned unexpected code {result.returncode}: {result.stderr.strip()}"
+            )
+
+        if result.returncode == 20 or "UNSAT" in result.stdout:
+            return None
+
+        model: List[int] = []
+        for line in result.stdout.splitlines():
+            line = line.strip()
+            if not line or line[0] != "v":
+                continue
+            for token in line.split()[1:]:
+                if token == "0":
+                    continue
+                model.append(int(token))
+
+        return model if model or result.returncode == 10 else None
+    finally:
+        try:
+            os.remove(cnf_path)
+        except OSError:
+            pass
+
+
 def find_unique_model(clauses: List[List[int]]) -> Optional[List[int]]:
     """Mutate clauses to enforce a unique satisfying assignment; return the model or None."""
     while True:
-        solver = Solver(bootstrap_with=clauses)
-        try:
-            if not solver.solve():
-                return None
-
-            model = solver.get_model()
-            if model is None:
-                return None
-        finally:
-            solver.delete()
+        model = cadical_solve(clauses)
+        if model is None:
+            return None
 
         block_clause = [-lit for lit in model if lit != 0]
-        alt_solver = Solver(bootstrap_with=clauses + [block_clause])
-        try:
-            if not alt_solver.solve():
-                return model
-
-            alt_model = alt_solver.get_model()
-            if alt_model is None:
-                return None
-        finally:
-            alt_solver.delete()
+        alt_model = cadical_solve(clauses + [block_clause])
+        if alt_model is None:
+            return model
 
         base_assignment = _model_to_assignment(model)
         alt_assignment = _model_to_assignment(alt_model)
@@ -178,6 +265,7 @@ def _generate_chunk(
     num_clauses: int,
     nvars_used: Optional[int],
     unique: bool,
+    planted: bool,
 ) -> Tuple[List[np.ndarray], List[np.ndarray], int, int]:
     """Generate a fixed number of SAT examples with a dedicated RNG."""
     rng = np.random.default_rng(seed)
@@ -190,8 +278,16 @@ def _generate_chunk(
     num_clauses = int(4.26 * nvars)
 
     while len(inputs) < target_examples:
-        clauses_list = make_rand_3sat(nvars, num_clauses, rng)
-        model = find_unique_model(clauses_list) if unique else find_any_model(clauses_list)
+        if planted:
+            clauses_list, model = make_planted_rand_3sat(nvars, rng)
+        else:
+            clauses_list = make_rand_3sat(nvars, num_clauses, rng)
+
+            if unique:
+                model = find_unique_model(clauses_list)
+            else:
+                model = cadical_solve(clauses_list)
+
         if model is None or len(clauses_list) > MCLAUSES:
             unsat_count += 1
             continue
@@ -233,6 +329,7 @@ def generate_examples(
     num_clauses: int = MIN_CLAUSES,
     nvars_used: Optional[int] = None,
     unique: bool = True,
+    planted: bool = False,
 ) -> Tuple[Dict[str, np.ndarray], int, int]:
     """Generate SAT dataset examples using multi-process workers."""
     if num_examples <= 0:
@@ -279,7 +376,7 @@ def generate_examples(
 
     if max_workers <= 1:
         for seed_item, target in zip(worker_seeds, chunk_sizes):
-            handle_chunk(_generate_chunk(seed_item, target, num_clauses, nvars_used, unique))
+            handle_chunk(_generate_chunk(seed_item, target, num_clauses, nvars_used, unique, planted))
     else:
         chunk_iter = iter(zip(worker_seeds, chunk_sizes))
 
@@ -295,6 +392,7 @@ def generate_examples(
                 num_clauses,
                 nvars_used,
                 unique,
+                planted,
             )
             pending[future] = None
 
@@ -401,9 +499,9 @@ def main() -> None:
             num_examples=TRAIN_NUM_EXAMPLES,
             seed=17,
             nvars_used=TRAIN_NUM_VARS_USED,
-            unique=False,
+            planted=True,
         ),
-        DatasetSplitConfig(name="test", num_examples=TEST_NUM_EXAMPLES, seed=23, unique=False),
+        DatasetSplitConfig(name="test", num_examples=TEST_NUM_EXAMPLES, seed=23, unique=False, planted=True),
     ]
 
     for split in splits:
@@ -412,6 +510,7 @@ def main() -> None:
             split.seed,
             nvars_used=split.nvars_used,
             unique=split.unique,
+            planted=split.planted,
         )
         save_dataset(output_root, split, data)
         print(
