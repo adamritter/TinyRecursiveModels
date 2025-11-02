@@ -12,9 +12,9 @@ from pysat.solvers import Solver
 from dataset.common import PuzzleDatasetMetadata
 
 NUM_VARS = 150
-TRAIN_NUM_EXAMPLES = 5000
-TEST_NUM_EXAMPLES = 2000
-TRAIN_NUM_VARS_USED = None
+TRAIN_NUM_EXAMPLES = 50000
+TEST_NUM_EXAMPLES = 100
+TRAIN_NUM_VARS_USED = 75
 MIN_CLAUSES = int(4.26 * NUM_VARS)
 MCLAUSES = int(5 * NUM_VARS)
 TOKENS_PER_FORMULA = MCLAUSES * 3
@@ -29,6 +29,7 @@ class DatasetSplitConfig:
     num_examples: int
     seed: int
     nvars_used: Optional[int] = None
+    unique: bool = True
 
 
 def _remap_instance_literals_and_model(
@@ -122,6 +123,18 @@ def _model_to_assignment(model: List[int]) -> Dict[int, int]:
     return assignment
 
 
+def find_any_model(clauses: List[List[int]]) -> Optional[List[int]]:
+    """Return any satisfying assignment for the clause set, or None if UNSAT."""
+    solver = Solver(bootstrap_with=clauses)
+    try:
+        if not solver.solve():
+            return None
+        model = solver.get_model()
+        return model if model is not None else None
+    finally:
+        solver.delete()
+
+
 def find_unique_model(clauses: List[List[int]]) -> Optional[List[int]]:
     """Mutate clauses to enforce a unique satisfying assignment; return the model or None."""
     while True:
@@ -164,6 +177,7 @@ def _generate_chunk(
     target_examples: int,
     num_clauses: int,
     nvars_used: Optional[int],
+    unique: bool,
 ) -> Tuple[List[np.ndarray], List[np.ndarray], int, int]:
     """Generate a fixed number of SAT examples with a dedicated RNG."""
     rng = np.random.default_rng(seed)
@@ -177,7 +191,7 @@ def _generate_chunk(
 
     while len(inputs) < target_examples:
         clauses_list = make_rand_3sat(nvars, num_clauses, rng)
-        model = find_unique_model(clauses_list)
+        model = find_unique_model(clauses_list) if unique else find_any_model(clauses_list)
         if model is None or len(clauses_list) > MCLAUSES:
             unsat_count += 1
             continue
@@ -218,6 +232,7 @@ def generate_examples(
     chunk_size: int = CHUNK_SIZE,
     num_clauses: int = MIN_CLAUSES,
     nvars_used: Optional[int] = None,
+    unique: bool = True,
 ) -> Tuple[Dict[str, np.ndarray], int, int]:
     """Generate SAT dataset examples using multi-process workers."""
     if num_examples <= 0:
@@ -264,7 +279,7 @@ def generate_examples(
 
     if max_workers <= 1:
         for seed_item, target in zip(worker_seeds, chunk_sizes):
-            handle_chunk(_generate_chunk(seed_item, target, num_clauses, nvars_used))
+            handle_chunk(_generate_chunk(seed_item, target, num_clauses, nvars_used, unique))
     else:
         chunk_iter = iter(zip(worker_seeds, chunk_sizes))
 
@@ -279,6 +294,7 @@ def generate_examples(
                 target,
                 num_clauses,
                 nvars_used,
+                unique,
             )
             pending[future] = None
 
@@ -394,6 +410,7 @@ def main() -> None:
             split.num_examples,
             split.seed,
             nvars_used=split.nvars_used,
+            unique=split.unique,
         )
         save_dataset(output_root, split, data)
         print(
