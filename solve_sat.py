@@ -244,8 +244,27 @@ def run_inference(
     """Recursively apply the model until all sequences halt."""
     batch = {k: v.to(device) for k, v in batch.items()}
 
+    def _to_device_tree(value):
+        if torch.is_tensor(value):
+            return value.to(device)
+        if isinstance(value, dict):
+            return {k: _to_device_tree(v) for k, v in value.items()}
+        return value
+
     with torch.inference_mode():
         carry = model.initial_carry(batch=batch)  # type: ignore[attr-defined]
+        if hasattr(carry, "inner_carry"):
+            inner = carry.inner_carry
+            if hasattr(inner, "z_H"):
+                inner.z_H = inner.z_H.to(device)
+            if hasattr(inner, "z_L"):
+                inner.z_L = inner.z_L.to(device)
+        if hasattr(carry, "steps"):
+            carry.steps = carry.steps.to(device)
+        if hasattr(carry, "halted"):
+            carry.halted = carry.halted.to(device)
+        if hasattr(carry, "current_data"):
+            carry.current_data = {k: _to_device_tree(v) for k, v in carry.current_data.items()}
         outputs: Dict[str, torch.Tensor] = {}
 
         max_steps = getattr(getattr(model, "model", None), "config", None)
@@ -315,4 +334,3 @@ def main(argv: Sequence[str]) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main(sys.argv[1:]))
-
