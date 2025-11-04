@@ -17,9 +17,9 @@ from omegaconf import OmegaConf
 
 from utils.functions import load_model_class
 
-NUM_VARS = 500
+NUM_VARS = 1000
 VOCAB_SIZE = 2 * NUM_VARS + 1  # includes padding token at index 0
-SEQ_LEN = 8250
+SEQ_LEN = 16500
 IGNORE_LABEL_ID = -100
 
 
