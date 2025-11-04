@@ -11,6 +11,7 @@ import argparse
 import sys
 from typing import Dict, Iterable, List, Sequence, Tuple
 
+import math
 import numpy as np
 import torch
 from omegaconf import OmegaConf
@@ -21,6 +22,19 @@ NUM_VARS = 1000
 VOCAB_SIZE = 2 * NUM_VARS + 1  # includes padding token at index 0
 SEQ_LEN = 16500
 IGNORE_LABEL_ID = -100
+
+DEFAULT_CHECKPOINT_PATH = "checkpoints/Sat_examples-ACT-torch/transformer1000/step_5000"
+DEFAULT_CONFIG_OVERRIDES = {
+    "data_paths": ["sat_examples"],
+    "evaluators": [],
+    "ema": True,
+    "load_checkpoint": DEFAULT_CHECKPOINT_PATH,
+}
+DEFAULT_ARCH_OVERRIDES = {
+    "H_cycles": 3,
+    "L_cycles": 4,
+    "L_layers": 2,
+}
 
 
 def parse_dimacs(lines: Iterable[str]) -> Tuple[int, List[List[int]]]:
@@ -199,6 +213,12 @@ def build_model(config_path: str, checkpoint_path: str, device: torch.device) ->
         raise TypeError("Model config must resolve to a dictionary.")
     config_dict = dict(config_dict)
 
+    for key, value in DEFAULT_CONFIG_OVERRIDES.items():
+        if key in config_dict:
+            config_dict[key] = value
+    for key, value in DEFAULT_ARCH_OVERRIDES.items():
+        config_dict[key] = value
+
     model_identifier = config_dict.pop("name")
     loss_cfg = config_dict.pop("loss")
     if not isinstance(loss_cfg, dict):
@@ -290,7 +310,11 @@ def run_inference(
 def main(argv: Sequence[str]) -> int:
     parser = argparse.ArgumentParser(description="Solve a 3-SAT instance using a trained TRM.")
     parser.add_argument("--config", default="config/arch/trm.yaml", help="Model architecture config.")
-    parser.add_argument("--checkpoint", required=True, help="Path to the trained model checkpoint.")
+    parser.add_argument(
+        "--checkpoint",
+        default=DEFAULT_CHECKPOINT_PATH,
+        help=f"Path to the trained model checkpoint (default: {DEFAULT_CHECKPOINT_PATH}).",
+    )
     parser.add_argument(
         "--device",
         default=None,
