@@ -285,6 +285,8 @@ def evaluate(
 
     with torch.inference_mode():
         return_keys = set(config.eval_save_outputs)
+        # Ensure predictions are requested so they can be logged
+        return_keys.add("preds")
         for evaluator in evaluators:
             evaluator.begin_eval()
             return_keys.update(evaluator.required_outputs)
@@ -428,24 +430,34 @@ def evaluate(
             if rank == 0:
                 print(f"  Completed inference in {inference_steps} steps ({time.time()-tm:.1f}s)")
 
+            preds_dict = preds if isinstance(preds, dict) else {}
             if rank == 0:
                 inputs_to_print = batch.get("inputs")
-                preds_to_print = preds.get("preds") if isinstance(preds, dict) else None
+                preds_to_print = None
+                if preds_dict:
+                    preds_to_print = preds_dict.get("preds")
+                    # Some models may return predictions under alternative keys; fall back if available
+                    if preds_to_print is None:
+                        preds_to_print = preds_dict.get("logits")
+                elif preds is not None:
+                    preds_to_print = preds
                 if inputs_to_print is not None:
                     print("  Inputs:")
                     print(inputs_to_print.detach().cpu())
                 if preds_to_print is not None:
                     print("  Predicted labels:")
                     print(preds_to_print.detach().cpu())
+                else:
+                    print("  Predicted labels unavailable in model outputs.")
 
-            for collection in (batch, preds):
+            for collection in (batch, preds_dict):
                 for k, v in collection.items():
                     if k in config.eval_save_outputs:
                         save_preds.setdefault(k, [])
                         save_preds[k].append(v.cpu())  # Move to CPU for saving GPU memory
 
             for evaluator in evaluators:
-                evaluator.update_batch(batch, preds)
+                evaluator.update_batch(batch, preds_dict)
 
             del carry, loss, preds, batch, all_finish
 
