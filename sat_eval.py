@@ -449,6 +449,12 @@ def evaluate(
                     print(preds_to_print.detach().cpu())
                 else:
                     print("  Predicted labels unavailable in model outputs.")
+                labels_to_print = batch.get("labels")
+                if labels_to_print is not None:
+                    print("  Ground-truth labels:")
+                    print(labels_to_print.detach().cpu())
+                else:
+                    print("  Ground-truth labels unavailable in batch.")
 
             for collection in (batch, preds_dict):
                 for k, v in collection.items():
