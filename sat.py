@@ -1,3 +1,4 @@
+import argparse
 import json
 import math
 import os
@@ -13,8 +14,8 @@ from pysat.solvers import Solver
 
 from dataset.common import PuzzleDatasetMetadata
 
-NUM_VARS = 300
-TRAIN_NUM_EXAMPLES = 50000
+NUM_VARS = 1000
+TRAIN_NUM_EXAMPLES = 25000
 TEST_NUM_EXAMPLES = 100
 TRAIN_NUM_VARS_USED = None
 MIN_CLAUSES = int(4.26 * NUM_VARS)
@@ -491,7 +492,119 @@ def save_dataset(root: Path, split: DatasetSplitConfig, data: Dict[str, np.ndarr
             json.dump(["3sat"], f)
 
 
-def main() -> None:
+def _decode_tokens_to_clauses(tokens: np.ndarray) -> List[List[int]]:
+    """Convert flat token sequence into clause lists."""
+    nonzero = tokens[tokens != 0]
+    if nonzero.size % 3 != 0:
+        raise ValueError("Token sequence length not divisible by 3.")
+    triplets = nonzero.reshape(-1, 3)
+    clauses: List[List[int]] = []
+    for triplet in triplets:
+        clause: List[int] = []
+        for token in triplet:
+            if 1 <= token <= NUM_VARS:
+                clause.append(int(token))
+            elif NUM_VARS < token <= 2 * NUM_VARS:
+                clause.append(-int(token - NUM_VARS))
+            else:
+                raise ValueError(f"Token {token} out of expected range.")
+        clauses.append(clause)
+    return clauses
+
+
+def _print_problem(split: str, index: int) -> None:
+    root = Path("sat_examples")
+    inputs_path = root / split / "all__inputs.npy"
+    if not inputs_path.exists():
+        raise FileNotFoundError(f"Inputs file not found at {inputs_path}")
+
+    inputs = np.load(inputs_path)
+    if index < 0 or index >= inputs.shape[0]:
+        raise IndexError(f"Problem index {index} out of range (0..{inputs.shape[0]-1}).")
+
+    tokens = inputs[index]
+    clauses = _decode_tokens_to_clauses(tokens)
+
+    if clauses:
+        num_vars = max(abs(lit) for clause in clauses for lit in clause)
+    else:
+        num_vars = NUM_VARS
+
+    print(f"p cnf {num_vars} {len(clauses)}")
+    for clause in clauses:
+        print(" ".join(str(lit) for lit in clause), "0")
+
+
+def _print_solution(split: str, index: int) -> None:
+    root = Path("sat_examples")
+    inputs_path = root / split / "all__inputs.npy"
+    if not inputs_path.exists():
+        raise FileNotFoundError(f"Inputs file not found at {inputs_path}")
+
+    inputs = np.load(inputs_path)
+    if index < 0 or index >= inputs.shape[0]:
+        raise IndexError(f"Problem index {index} out of range (0..{inputs.shape[0]-1}).")
+
+    tokens = inputs[index]
+    clauses = _decode_tokens_to_clauses(tokens)
+
+    model = cadical_solve(clauses)
+    if model is None:
+        print("s UNSATISFIABLE")
+        return
+
+    assignment: Dict[int, int] = {}
+    for lit in model:
+        if lit == 0:
+            continue
+        assignment[abs(lit)] = lit
+
+    if clauses:
+        max_var = max(max(abs(lit) for lit in clause) for clause in clauses)
+    else:
+        max_var = max(assignment.keys(), default=0)
+
+    print("s SATISFIABLE")
+    if max_var == 0:
+        print("v 0")
+        return
+
+    literals: List[int] = []
+    for var in range(1, max_var + 1):
+        value = assignment.get(var)
+        if value is None:
+            # Default to positive assignment if solver omitted the variable.
+            value = var
+        literals.append(value)
+    print("v", *literals, 0)
+
+
+def main(argv: Optional[List[str]] = None) -> None:
+    parser = argparse.ArgumentParser(description="Generate SAT datasets or inspect stored problems.")
+    action_group = parser.add_mutually_exclusive_group()
+    action_group.add_argument(
+        "--problem",
+        nargs=2,
+        metavar=("SPLIT", "INDEX"),
+        help="Output the specified problem from the saved dataset in DIMACS CNF format.",
+    )
+    action_group.add_argument(
+        "--solution",
+        nargs=2,
+        metavar=("SPLIT", "INDEX"),
+        help="Output a satisfying assignment for the specified problem in DIMACS solution format.",
+    )
+    args = parser.parse_args(argv)
+
+    if args.problem:
+        split, index_str = args.problem
+        _print_problem(split, int(index_str))
+        return
+    if args.solution:
+        split, index_str = args.solution
+        _print_solution(split, int(index_str))
+        return
+
     output_root = Path("sat_examples")
     splits = [
         DatasetSplitConfig(
