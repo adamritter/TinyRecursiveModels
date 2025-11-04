@@ -482,9 +482,9 @@ def save_dataset(root: Path, split: DatasetSplitConfig, data: Dict[str, np.ndarr
     metadata = PuzzleDatasetMetadata(
         seq_len=SEQ_LEN,
         vocab_size=VOCAB_SIZE,
-        pad_id=0,
-        ignore_label_id=0,
-        blank_identifier_id=0,
+        pad_id=-1,
+        ignore_label_id=-1,
+        blank_identifier_id=-1,
         num_puzzle_identifiers=1,
         total_groups=num_examples,
         mean_puzzle_examples=1.0,
