@@ -158,6 +158,15 @@ def encode_satisfied_literals(clauses: np.ndarray, tokens: np.ndarray, model: Li
     return labels
 
 
+def token_to_literal(token: int) -> int:
+    """Inverse of encode_clauses for a single token."""
+    if token == 0:
+        raise ValueError("Token 0 does not map to a literal.")
+    if 1 <= token <= NUM_VARS:
+        return token
+    return -(token - NUM_VARS)
+
+
 def _model_to_assignment(model: List[int]) -> Dict[int, int]:
     assignment: Dict[int, int] = {}
     for lit in model:
@@ -541,22 +550,24 @@ def _print_solution(split: str, index: int) -> None:
     if not inputs_path.exists():
         raise FileNotFoundError(f"Inputs file not found at {inputs_path}")
 
+    labels_path = root / split / "all__labels.npy"
+    if not labels_path.exists():
+        raise FileNotFoundError(f"Labels file not found at {labels_path}")
+
     inputs = np.load(inputs_path)
+    labels = np.load(labels_path)
     if index < 0 or index >= inputs.shape[0]:
         raise IndexError(f"Problem index {index} out of range (0..{inputs.shape[0]-1}).")
 
     tokens = inputs[index]
+    label_tokens = labels[index]
     clauses = _decode_tokens_to_clauses(tokens)
 
-    model = cadical_solve(clauses)
-    if model is None:
-        print("s UNSATISFIABLE")
-        return
-
     assignment: Dict[int, int] = {}
-    for lit in model:
-        if lit == 0:
+    for token in label_tokens:
+        if token == 0:
             continue
+        lit = token_to_literal(int(token))
         assignment[abs(lit)] = lit
 
     if clauses:
