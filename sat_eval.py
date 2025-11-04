@@ -335,7 +335,6 @@ def train_batch(config: PretrainConfig, train_state: TrainState, batch: Any, glo
         carry=train_state.carry,
         batch=batch,
         return_keys=[],
-        effective_halt_max_steps=eff_limit_t,  # <— new arg
     )
 
     ((1 / global_batch_size) * loss).backward()
@@ -462,7 +461,6 @@ def evaluate(
                         carry=carry,
                         batch=sub_batch,
                         return_keys=return_keys,
-                        effective_halt_max_steps=eff_limit_t,
                     )
                     inference_steps += 1
 
@@ -542,7 +540,6 @@ def evaluate(
                         carry=carry,
                         batch=batch,
                         return_keys=return_keys,
-                        effective_halt_max_steps=eff_limit_t,
                     )
                     inference_steps += 1
 
