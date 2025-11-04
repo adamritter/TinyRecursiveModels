@@ -2,9 +2,6 @@ import time
 from typing import Optional, Any, Sequence, List
 from dataclasses import dataclass
 import os
-import math
-import yaml
-import shutil
 import copy
 
 import torch
@@ -12,8 +9,6 @@ import torch.distributed as dist
 from torch import nn
 from torch.utils.data import DataLoader
 
-import tqdm
-import wandb
 import coolname
 import hydra
 import pydantic
@@ -24,7 +19,6 @@ from puzzle_dataset import PuzzleDataset, PuzzleDatasetConfig, PuzzleDatasetMeta
 from utils.functions import load_model_class, get_model_source_path
 from models.sparse_embedding import CastedSparseEmbeddingSignSGD_Distributed
 from models.ema import EMAHelper
-
 
 class LossConfig(pydantic.BaseModel):
     model_config = pydantic.ConfigDict(extra='allow')
@@ -204,27 +198,6 @@ def create_model(config: PretrainConfig, train_metadata: PuzzleDatasetMetadata, 
 
     return model, optimizers, optimizer_lrs
 
-def mix_weights_direct(device, alpha, net, nets):
-    sd = []
-    for i in range(len(nets)):
-        sd += [nets[i].state_dict()]
-    sd_alpha = {}
-    for k in sd[0].keys():
-        comb_net = alpha[0]*sd[0][k].to(device)
-        for i in range(1,len(nets)):
-            comb_net += alpha[i]*sd[i][k].to(device)
-        sd_alpha[k] =  comb_net
-    net.load_state_dict(sd_alpha)
-    return net
-
-def cosine_schedule_with_warmup_lr_lambda(
-    current_step: int, *, base_lr: float, num_warmup_steps: int, num_training_steps: int, min_ratio: float = 0.0, num_cycles: float = 0.5
-):
-    if current_step < num_warmup_steps:
-        return base_lr * float(current_step) / float(max(1, num_warmup_steps))
-
-    progress = float(current_step - num_warmup_steps) / float(max(1, num_training_steps - num_warmup_steps))
-    return base_lr * (min_ratio + max(0.0, (1 - min_ratio) * 0.5 * (1.0 + math.cos(math.pi * float(num_cycles) * 2.0 * progress))))
 
 
 def init_train_state(config: PretrainConfig, train_metadata: PuzzleDatasetMetadata, rank: int, world_size: int):
@@ -275,15 +248,6 @@ def load_checkpoint(model: nn.Module, config: PretrainConfig):
         model.load_state_dict(state_dict, assign=True)
 
 
-def compute_lr(base_lr: float, config: PretrainConfig, train_state: TrainState):
-    return cosine_schedule_with_warmup_lr_lambda(
-        current_step=train_state.step,
-        base_lr=base_lr,
-        num_warmup_steps=round(config.lr_warmup_steps),
-        num_training_steps=train_state.total_steps,
-        min_ratio=config.lr_min_ratio
-    )
-
 
 
 def create_evaluators(config: PretrainConfig, eval_metadata: PuzzleDatasetMetadata) -> List[Any]:
@@ -305,91 +269,6 @@ train_batch_counter = 0
 # Current per-batch step budget (we avoid mutating model.config.halt_max_steps)
 effective_halt_max_steps_state = None
 
-def train_batch(config: PretrainConfig, train_state: TrainState, batch: Any, global_batch_size: int, rank: int, world_size: int):
-    train_state.step += 1
-    if train_state.step > train_state.total_steps:  # At most train_total_steps
-        return
-
-    # To device
-    batch = {k: v.cuda() for k, v in batch.items()}
-
-    # Init carry if it is None
-    if train_state.carry is None:
-        with torch.device("cuda"):
-            train_state.carry = train_state.model.initial_carry(batch)  # type: ignore
-
-    # ----- Effective halt limit (tensor) -----
-    global effective_halt_max_steps_state
-    if effective_halt_max_steps_state is None:
-        # Initialize once from configured override if present, otherwise from model’s cap
-        base_halt = (
-            int(config.iterate_halt_max_steps)
-            if config.iterate_halt_max_steps is not None
-            else int(train_state.model.model.config.halt_max_steps)
-        )
-        effective_halt_max_steps_state = base_halt
-    eff_limit_t = torch.tensor(effective_halt_max_steps_state, device="cuda", dtype=torch.int32)
-
-    # Forward
-    train_state.carry, loss, metrics, _, _ = train_state.model(
-        carry=train_state.carry,
-        batch=batch,
-        return_keys=[],
-    )
-
-    ((1 / global_batch_size) * loss).backward()
-
-    # Allreduce
-    if world_size > 1:
-        for param in train_state.model.parameters():
-            if param.grad is not None:
-                dist.all_reduce(param.grad)
-            
-    # Apply optimizer
-    lr_this_step = None    
-    for optim, base_lr in zip(train_state.optimizers, train_state.optimizer_lrs):
-        lr_this_step = compute_lr(base_lr, config, train_state)
-
-        for param_group in optim.param_groups:
-            param_group['lr'] = lr_this_step
-            
-        optim.step()
-        optim.zero_grad()
-
-    # Reduce metrics
-    if len(metrics):
-        assert not any(v.requires_grad for v in metrics.values())
-
-        metric_keys = list(sorted(metrics.keys()))  # Sort keys to guarantee all processes use the same order.
-        # Reduce and reconstruct
-        metric_values = torch.stack([metrics[k] for k in metric_keys])
-        if world_size > 1:
-            dist.reduce(metric_values, dst=0)
-
-        if rank == 0:
-            metric_values = metric_values.cpu().numpy()
-            reduced_metrics = {k: metric_values[i] for i, k in enumerate(metric_keys)}
-            
-            # Postprocess
-            count = max(reduced_metrics["count"], 1)  # Avoid NaNs
-            reduced_metrics = {f"train/{k}": v / (global_batch_size if k.endswith("loss") else count) for k, v in reduced_metrics.items()}
-
-            reduced_metrics["train/lr"] = lr_this_step
-            # ---- Dynamic effective halt_max_steps adjustment (no module mutation) ----
-            # Use configured `max_step_override` instead of env var.
-            override_val = config.max_step_override
-            if override_val is not None and "train/q_halt_accuracy" in reduced_metrics:
-                global train_batch_counter
-                current_halt_max = int(effective_halt_max_steps_state)
-                train_batch_counter += 1
-                if (reduced_metrics["train/q_halt_accuracy"] > 0.95 and override_val > current_halt_max):
-                    if train_batch_counter == 5:
-                        effective_halt_max_steps_state = current_halt_max + 1
-                        print(f"Auto-increased effective halt_max_steps to {effective_halt_max_steps_state} (no module mutation)")
-                        train_batch_counter = 0
-                else:
-                    train_batch_counter = 0
-            return reduced_metrics
 
 def evaluate(
     config: PretrainConfig,
@@ -651,32 +530,6 @@ def evaluate(
 
     return reduced_metrics
 
-def save_code_and_config(config: PretrainConfig):
-    if config.checkpoint_path is None or wandb.run is None:
-        return
-
-    os.makedirs(config.checkpoint_path, exist_ok=True)
-
-    # Copy code
-    code_list = [
-        get_model_source_path(config.arch.name),
-        get_model_source_path(config.arch.loss.name)
-    ]
-    for code_file in code_list:
-        if code_file is not None:
-            code_name = os.path.basename(code_file)
-
-            shutil.copy(code_file, os.path.join(config.checkpoint_path, code_name))
-
-    # Dump config as yaml
-    config_file = os.path.join(config.checkpoint_path, "all_config.yaml")
-    with open(config_file, "wt") as f:
-        yaml.dump(config.model_dump(), f)
-
-    # Log code
-    wandb.run.log_code(config.checkpoint_path)
-
-
 def load_synced_config(hydra_config: DictConfig, rank: int, world_size: int) -> PretrainConfig:
     objects = [None]
     if rank == 0:
@@ -751,106 +604,37 @@ def launch(hydra_config: DictConfig):
     # Progress bar and logger
     progress_bar = None
     ema_helper = None
-    if RANK == 0:
-        progress_bar = tqdm.tqdm(total=train_state.total_steps)
-        wandb.init(project=config.project_name, name=config.run_name, config=config.model_dump(), settings=wandb.Settings(_disable_stats=True))  # type: ignore
-        wandb.log({"num_params": sum(x.numel() for x in train_state.model.parameters())}, step=0)
-        save_code_and_config(config)
     if config.ema:
         print('Setup EMA')
         ema_helper = EMAHelper(mu=config.ema_rate)
         ema_helper.register(train_state.model)
 
     # --- Evaluation‑only mode -------------------------------------------------
-    if config.eval_only:
-        if RANK == 0:
-            print("EVALUATION ONLY - no training will be performed")
-        # If EMA is enabled, switch to the EMA weights before evaluating
-        if config.ema and ema_helper is not None:
-            print("SWITCH TO EMA")
-            train_state_eval = copy.deepcopy(train_state)
-            train_state_eval.model = ema_helper.ema_copy(train_state_eval.model)
-        else:
-            train_state_eval = train_state
+    if RANK == 0:
+        print("EVALUATION ONLY - no training will be performed")
+    # If EMA is enabled, switch to the EMA weights before evaluating
+    if config.ema and ema_helper is not None:
+        print("SWITCH TO EMA")
+        train_state_eval = copy.deepcopy(train_state)
+        train_state_eval.model = ema_helper.ema_copy(train_state_eval.model)
+    else:
+        train_state_eval = train_state
 
-        train_state_eval.model.eval()
-        metrics = evaluate(
-            config,
-            train_state_eval,
-            eval_loader,
-            eval_metadata,
-            evaluators,
-            rank=RANK,
-            world_size=WORLD_SIZE,
-            cpu_group=CPU_PROCESS_GROUP,
-        )
+    train_state_eval.model.eval()
+    metrics = evaluate(
+        config,
+        train_state_eval,
+        eval_loader,
+        eval_metadata,
+        evaluators,
+        rank=RANK,
+        world_size=WORLD_SIZE,
+        cpu_group=CPU_PROCESS_GROUP,
+    )
 
-        if RANK == 0 and metrics is not None:
-            wandb.log(metrics, step=train_state_eval.step)
-
-        # Optionally save checkpoint of evaluated model
-        if RANK == 0:
-            save_train_state(config, train_state_eval)
-
-        # Clean up and exit early
-        if dist.is_initialized():
-            dist.destroy_process_group()
-        wandb.finish()
-        return
-    # Training Loop
-    for _iter_id in range(total_iters):
-        print (f"[Rank {RANK}, World Size {WORLD_SIZE}]: Epoch {_iter_id * train_epochs_per_iter}")
-
-        ############ Train Iter
-        if RANK == 0:
-            print("TRAIN")
-        train_state.model.train()
-        for set_name, batch, global_batch_size in train_loader:
-            metrics = train_batch(config, train_state, batch, global_batch_size, rank=RANK, world_size=WORLD_SIZE)
-
-            if RANK == 0 and metrics is not None:
-                wandb.log(metrics, step=train_state.step)
-                progress_bar.update(train_state.step - progress_bar.n)  # type: ignore
-            if config.ema:
-                ema_helper.update(train_state.model)
-
-        if _iter_id >= config.min_eval_interval:
-            ############ Evaluation
-            if RANK == 0:
-                print("EVALUATE")
-            if config.ema:
-                print("SWITCH TO EMA")
-                train_state_eval = copy.deepcopy(train_state)
-                train_state_eval.model = ema_helper.ema_copy(train_state_eval.model)
-            else:
-                train_state_eval = train_state
-            train_state_eval.model.eval()
-            metrics = evaluate(config, 
-                train_state_eval, 
-                eval_loader, 
-                eval_metadata, 
-                evaluators,
-                rank=RANK, 
-                world_size=WORLD_SIZE,
-                cpu_group=CPU_PROCESS_GROUP)
-
-            if RANK == 0 and metrics is not None:
-                wandb.log(metrics, step=train_state.step)
-                
-            ############ Checkpointing
-            if RANK == 0:
-                print("SAVE CHECKPOINT")
-            if RANK == 0 and (config.checkpoint_every_eval or (_iter_id == total_iters - 1)):
-                save_train_state(config, train_state_eval)
-
-            if config.ema:
-                del train_state_eval
-
-    # finalize
+    # Clean up and exit early
     if dist.is_initialized():
         dist.destroy_process_group()
-    wandb.finish()
-
 
 if __name__ == "__main__":
     launch()
