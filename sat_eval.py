@@ -428,6 +428,16 @@ def evaluate(
             if rank == 0:
                 print(f"  Completed inference in {inference_steps} steps ({time.time()-tm:.1f}s)")
 
+            if rank == 0:
+                inputs_to_print = batch.get("inputs")
+                preds_to_print = preds.get("preds") if isinstance(preds, dict) else None
+                if inputs_to_print is not None:
+                    print("  Inputs:")
+                    print(inputs_to_print.detach().cpu())
+                if preds_to_print is not None:
+                    print("  Predicted labels:")
+                    print(preds_to_print.detach().cpu())
+
             for collection in (batch, preds):
                 for k, v in collection.items():
                     if k in config.eval_save_outputs:
