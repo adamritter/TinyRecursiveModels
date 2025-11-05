@@ -36,6 +36,10 @@ class DatasetSplitConfig:
     planted: bool = False
 
 
+# Alias maintained for external callers that expect DataSplitConfig naming.
+DataSplitConfig = DatasetSplitConfig
+
+
 def _remap_instance_literals_and_model(
     clauses: np.ndarray,
     model: List[int],
@@ -164,7 +168,9 @@ def token_to_literal(token: int) -> int:
         raise ValueError("Token 0 does not map to a literal.")
     if 1 <= token <= NUM_VARS:
         return token
-    return -(token - NUM_VARS)
+    if NUM_VARS < token <= 2 * NUM_VARS:
+        return -(token - NUM_VARS)
+    raise ValueError(f"Token {token} out of expected range for negative literal.")
 
 
 def _model_to_assignment(model: List[int]) -> Dict[int, int]:
@@ -273,9 +279,7 @@ def _generate_chunk(
     seed: np.random.SeedSequence,
     target_examples: int,
     num_clauses: int,
-    nvars_used: Optional[int],
-    unique: bool,
-    planted: bool,
+    split_config: DataSplitConfig,
 ) -> Tuple[List[np.ndarray], List[np.ndarray], int, int]:
     """Generate a fixed number of SAT examples with a dedicated RNG."""
     rng = np.random.default_rng(seed)
@@ -283,6 +287,10 @@ def _generate_chunk(
     labels: List[np.ndarray] = []
     sat_count = 0
     unsat_count = 0
+
+    nvars_used = split_config.nvars_used
+    unique = split_config.unique
+    planted = split_config.planted
 
     nvars = NUM_VARS if nvars_used is None else nvars_used
     num_clauses = int(4.26 * nvars)
@@ -332,16 +340,15 @@ def _print_progress(previous: int, current: int) -> None:
 
 
 def generate_examples(
-    num_examples: int,
-    seed: int,
+    split_config: DataSplitConfig,
     num_workers: Optional[int] = None,
     chunk_size: int = CHUNK_SIZE,
     num_clauses: int = MIN_CLAUSES,
-    nvars_used: Optional[int] = None,
-    unique: bool = True,
-    planted: bool = False,
 ) -> Tuple[Dict[str, np.ndarray], int, int]:
     """Generate SAT dataset examples using multi-process workers."""
+    num_examples = split_config.num_examples
+    seed = split_config.seed
+
     if num_examples <= 0:
         empty = np.zeros((0, SEQ_LEN), dtype=np.int32)
         data = {
@@ -386,7 +393,7 @@ def generate_examples(
 
     if max_workers <= 1:
         for seed_item, target in zip(worker_seeds, chunk_sizes):
-            handle_chunk(_generate_chunk(seed_item, target, num_clauses, nvars_used, unique, planted))
+            handle_chunk(_generate_chunk(seed_item, target, num_clauses, split_config))
     else:
         chunk_iter = iter(zip(worker_seeds, chunk_sizes))
 
@@ -400,9 +407,7 @@ def generate_examples(
                 seed_item,
                 target,
                 num_clauses,
-                nvars_used,
-                unique,
-                planted,
+                split_config,
             )
             pending[future] = None
 
@@ -567,7 +572,7 @@ def _print_solution(split: str, index: int) -> None:
     for token in label_tokens:
         if token == 0:
             continue
-        lit = token_to_literal(int(token))
+        lit = token_to_literal(token)
         assignment[abs(lit)] = lit
 
     if clauses:
@@ -629,13 +634,7 @@ def main(argv: Optional[List[str]] = None) -> None:
     ]
 
     for split in splits:
-        data, sat_count, unsat_count = generate_examples(
-            split.num_examples,
-            split.seed,
-            nvars_used=split.nvars_used,
-            unique=split.unique,
-            planted=split.planted,
-        )
+        data, sat_count, unsat_count = generate_examples(split)
         save_dataset(output_root, split, data)
         print(
             f"Wrote {split.num_examples} {split.name} examples to {output_root / split.name} "
