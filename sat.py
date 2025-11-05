@@ -14,9 +14,9 @@ from pysat.solvers import Solver
 
 from dataset.common import PuzzleDatasetMetadata
 
-NUM_VARS = 1000
-TRAIN_NUM_EXAMPLES = 25000
-TEST_NUM_EXAMPLES = 100
+NUM_VARS = 20
+TRAIN_NUM_EXAMPLES = 250000
+TEST_NUM_EXAMPLES = 1000
 TRAIN_NUM_VARS_USED = None
 MIN_CLAUSES = int(4.26 * NUM_VARS)
 MCLAUSES = int(math.ceil(5.5 * NUM_VARS))
@@ -631,9 +631,10 @@ def main(argv: Optional[List[str]] = None) -> None:
             num_examples=TRAIN_NUM_EXAMPLES,
             seed=17,
             nvars_used=TRAIN_NUM_VARS_USED,
-            planted=True,
+            planted=False,
+            unique=True,
         ),
-        DatasetSplitConfig(name="test", num_examples=TEST_NUM_EXAMPLES, seed=23, unique=False, planted=True),
+        DatasetSplitConfig(name="test", num_examples=TEST_NUM_EXAMPLES, seed=23, unique=True, planted=False),
     ]
 
     for split in splits:
