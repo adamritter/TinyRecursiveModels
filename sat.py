@@ -32,6 +32,7 @@ class DatasetSplitConfig:
     num_examples: int
     seed: int
     nvars_used: Optional[int] = None
+    min_vars: Optional[int] = None
     unique: bool = True
     planted: bool = False
 
@@ -293,6 +294,8 @@ def _generate_chunk(
     planted = split_config.planted
 
     nvars = NUM_VARS if nvars_used is None else nvars_used
+    if split_config.min_vars is not None and nvars > split_config.min_vars:
+        nvars = rng.integers(split_config.min_vars, nvars + 1)
     num_clauses = int(4.26 * nvars)
 
     while len(inputs) < target_examples:
