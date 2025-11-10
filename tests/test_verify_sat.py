@@ -44,8 +44,10 @@ v 1 -2 0
 """,
     )
 
-    _num_vars, clauses = parse_cnf(str(cnf_path))
-    assignment, status, consistent = parse_solution(str(solution_path))
+    _num_vars, clauses = parse_cnf(cnf_path.read_text(encoding="utf-8"))
+    assignment, status, consistent = parse_solution(
+        solution_path.read_text(encoding="utf-8")
+    )
 
     assert clauses == [[1, -2], [-2]]
     assert assignment == {1: True, 2: False}
@@ -71,8 +73,10 @@ def test_verify_sat_rejects_inconsistent_assignment(tmp_path: Path) -> None:
 """,
     )
 
-    _num_vars, clauses = parse_cnf(str(cnf_path))
-    assignment, status, consistent = parse_solution(str(solution_path))
+    _num_vars, clauses = parse_cnf(cnf_path.read_text(encoding="utf-8"))
+    assignment, status, consistent = parse_solution(
+        solution_path.read_text(encoding="utf-8")
+    )
 
     assert consistent is False
     assert evaluate(clauses, assignment, status, consistent) is False
@@ -96,8 +100,10 @@ def test_verify_sat_rejects_unsatisfiable_claim(tmp_path: Path) -> None:
 """,
     )
 
-    _num_vars, clauses = parse_cnf(str(cnf_path))
-    assignment, status, consistent = parse_solution(str(solution_path))
+    _num_vars, clauses = parse_cnf(cnf_path.read_text(encoding="utf-8"))
+    assignment, status, consistent = parse_solution(
+        solution_path.read_text(encoding="utf-8")
+    )
 
     assert status == "unsatisfiable"
     assert evaluate(clauses, assignment, status, consistent) is False
@@ -115,4 +121,4 @@ def test_parse_cnf_requires_header(tmp_path: Path) -> None:
     )
 
     with pytest.raises(ValueError, match="CNF header not found"):
-        parse_cnf(str(cnf_path))
+        parse_cnf(cnf_path.read_text(encoding="utf-8"))

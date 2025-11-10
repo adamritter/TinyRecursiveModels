@@ -8,37 +8,37 @@ the solution file; otherwise outputs "incorrect".
 from __future__ import annotations
 
 import argparse
+from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Tuple
 
 
-def parse_cnf(path: str) -> Tuple[int, List[List[int]]]:
-    """Parse a DIMACS CNF file into (num_vars, clauses)."""
+def parse_cnf(content: str) -> Tuple[int, List[List[int]]]:
+    """Parse a DIMACS CNF file content into (num_vars, clauses)."""
     num_vars: Optional[int] = None
     clauses: List[List[int]] = []
     current_clause: List[int] = []
 
-    with open(path, "r", encoding="utf-8") as f:
-        for raw_line in f:
-            line = raw_line.strip()
-            if not line or line.startswith("c"):
-                continue
+    for raw_line in content.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("c"):
+            continue
 
-            if line.startswith("p"):
-                parts = line.split()
-                if len(parts) < 4 or parts[1].lower() != "cnf":
-                    raise ValueError("Invalid CNF header (expected 'p cnf <vars> <clauses>').")
-                num_vars = int(parts[2])
-                continue
+        if line.startswith("p"):
+            parts = line.split()
+            if len(parts) < 4 or parts[1].lower() != "cnf":
+                raise ValueError("Invalid CNF header (expected 'p cnf <vars> <clauses>').")
+            num_vars = int(parts[2])
+            continue
 
-            for token in line.split():
-                lit = int(token)
-                if lit == 0:
-                    if not current_clause:
-                        raise ValueError("Clause terminator encountered without literals.")
-                    clauses.append(current_clause)
-                    current_clause = []
-                else:
-                    current_clause.append(lit)
+        for token in line.split():
+            lit = int(token)
+            if lit == 0:
+                if not current_clause:
+                    raise ValueError("Clause terminator encountered without literals.")
+                clauses.append(current_clause)
+                current_clause = []
+            else:
+                current_clause.append(lit)
 
     if current_clause:
         raise ValueError("Missing clause terminator at end of CNF file.")
@@ -48,41 +48,40 @@ def parse_cnf(path: str) -> Tuple[int, List[List[int]]]:
     return num_vars, clauses
 
 
-def parse_solution(path: str) -> Tuple[Dict[int, bool], Optional[str], bool]:
-    """Parse a DIMACS solution file into (assignment, status, consistent)."""
+def parse_solution(content: str) -> Tuple[Dict[int, bool], Optional[str], bool]:
+    """Parse a DIMACS solution file content into (assignment, status, consistent)."""
     assignment: Dict[int, bool] = {}
     status: Optional[str] = None
     consistent = True
 
-    with open(path, "r", encoding="utf-8") as f:
-        for raw_line in f:
-            stripped = raw_line.strip()
-            if not stripped or stripped.startswith("c"):
+    for raw_line in content.splitlines():
+        stripped = raw_line.strip()
+        if not stripped or stripped.startswith("c"):
+            continue
+
+        if stripped.startswith("s"):
+            parts = stripped.split()
+            if len(parts) >= 2:
+                status = parts[1].lower()
+            continue
+
+        tokens: Iterable[str]
+        if stripped.startswith("v"):
+            tokens = stripped.split()[1:]
+        else:
+            tokens = stripped.split()
+
+        for token in tokens:
+            lit = int(token)
+            if lit == 0:
                 continue
 
-            if stripped.startswith("s"):
-                parts = stripped.split()
-                if len(parts) >= 2:
-                    status = parts[1].lower()
-                continue
+            var = abs(lit)
+            value = lit > 0
 
-            tokens: Iterable[str]
-            if stripped.startswith("v"):
-                tokens = stripped.split()[1:]
-            else:
-                tokens = stripped.split()
-
-            for token in tokens:
-                lit = int(token)
-                if lit == 0:
-                    continue
-
-                var = abs(lit)
-                value = lit > 0
-
-                if var in assignment and assignment[var] != value:
-                    consistent = False
-                assignment[var] = value
+            if var in assignment and assignment[var] != value:
+                consistent = False
+            assignment[var] = value
 
     return assignment, status, consistent
 
@@ -128,8 +127,10 @@ def main() -> int:
     args = parser.parse_args()
 
     try:
-        _num_vars, clauses = parse_cnf(args.cnf)
-        assignment, status, consistent = parse_solution(args.solution)
+        cnf_content = Path(args.cnf).read_text(encoding="utf-8")
+        solution_content = Path(args.solution).read_text(encoding="utf-8")
+        _num_vars, clauses = parse_cnf(cnf_content)
+        assignment, status, consistent = parse_solution(solution_content)
         ok = evaluate(clauses, assignment, status, consistent)
     except Exception:
         ok = False
