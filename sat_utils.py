@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 
 def parse_cnf(content: str) -> Tuple[int, List[List[int]]]:
@@ -102,5 +102,45 @@ def serialize_cnf(num_vars: int, clauses: Sequence[Sequence[int]]) -> str:
     return "\n".join(lines) + "\n"
 
 
-__all__ = ["parse_cnf", "parse_solution", "serialize_cnf"]
+def clause_satisfied(clause: Sequence[int], assignment: Mapping[int, bool]) -> bool:
+    """Return ``True`` if ``clause`` is satisfied under ``assignment``."""
+
+    for lit in clause:
+        var = abs(lit)
+        value = assignment.get(var)
+        if value is None:
+            continue
+        literal_truth = (lit > 0 and value) or (lit < 0 and not value)
+        if literal_truth:
+            return True
+    return False
+
+
+def evaluate_solution(
+    clauses: Sequence[Sequence[int]],
+    assignment: Mapping[int, bool],
+    status: Optional[str],
+    consistent: bool,
+) -> bool:
+    """Return ``True`` if the parsed solution satisfies ``clauses``."""
+
+    if not consistent:
+        return False
+    if status == "unsatisfiable":
+        return False
+    if not clauses:
+        return True
+    if not assignment:
+        return False
+
+    return all(clause_satisfied(clause, assignment) for clause in clauses)
+
+
+__all__ = [
+    "clause_satisfied",
+    "evaluate_solution",
+    "parse_cnf",
+    "parse_solution",
+    "serialize_cnf",
+]
 

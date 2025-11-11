@@ -12,8 +12,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 import pytest
 
-from sat_utils import parse_cnf, parse_solution
-from verify_sat import evaluate
+from sat_utils import evaluate_solution, parse_cnf, parse_solution
 
 
 def write_tmp_file(tmp_path: Path, name: str, content: str) -> Path:
@@ -54,7 +53,7 @@ v 1 -2 0
     assert assignment == {1: True, 2: False}
     assert status == "satisfiable"
     assert consistent is True
-    assert evaluate(clauses, assignment, status, consistent) is True
+    assert evaluate_solution(clauses, assignment, status, consistent) is True
 
 
 def test_verify_sat_rejects_inconsistent_assignment(tmp_path: Path) -> None:
@@ -80,7 +79,7 @@ def test_verify_sat_rejects_inconsistent_assignment(tmp_path: Path) -> None:
     )
 
     assert consistent is False
-    assert evaluate(clauses, assignment, status, consistent) is False
+    assert evaluate_solution(clauses, assignment, status, consistent) is False
 
 
 def test_verify_sat_rejects_unsatisfiable_claim(tmp_path: Path) -> None:
@@ -107,7 +106,7 @@ def test_verify_sat_rejects_unsatisfiable_claim(tmp_path: Path) -> None:
     )
 
     assert status == "unsatisfiable"
-    assert evaluate(clauses, assignment, status, consistent) is False
+    assert evaluate_solution(clauses, assignment, status, consistent) is False
 
 
 def test_parse_cnf_requires_header(tmp_path: Path) -> None:

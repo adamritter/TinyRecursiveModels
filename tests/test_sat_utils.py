@@ -7,7 +7,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 import pytest
 
-from sat_utils import parse_cnf, serialize_cnf
+from sat_utils import clause_satisfied, evaluate_solution, parse_cnf, serialize_cnf
 
 
 def test_serialize_cnf_roundtrip() -> None:
@@ -24,3 +24,19 @@ def test_serialize_cnf_roundtrip() -> None:
 def test_serialize_cnf_rejects_invalid_literals() -> None:
     with pytest.raises(ValueError, match="Literals must be non-zero"):
         serialize_cnf(1, [[0]])
+
+
+def test_clause_satisfied_detects_truth() -> None:
+    assignment = {1: True, 2: False}
+
+    assert clause_satisfied([1, -2], assignment) is True
+    assert clause_satisfied([-1, 2], assignment) is False
+
+
+def test_evaluate_solution_requires_consistency() -> None:
+    clauses = [[1, -2], [-1, 2]]
+    assignment = {1: True, 2: True}
+
+    assert evaluate_solution(clauses, assignment, "satisfiable", True) is True
+    assert evaluate_solution(clauses, assignment, "unsatisfiable", True) is False
+    assert evaluate_solution(clauses, assignment, "satisfiable", False) is False

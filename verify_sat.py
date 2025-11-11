@@ -11,7 +11,7 @@ import argparse
 from pathlib import Path
 from typing import Dict, List, Optional
 
-from sat_utils import parse_cnf, parse_solution
+from sat_utils import evaluate_solution, parse_cnf, parse_solution
 
 
 def evaluate(
@@ -20,32 +20,9 @@ def evaluate(
     status: Optional[str],
     consistent: bool,
 ) -> bool:
-    """Return True if the assignment satisfies the clauses."""
-    if not consistent:
-        return False
-    if status == "unsatisfiable":
-        # Claimed UNSAT but an assignment was provided.
-        return False
-    if not clauses:
-        return True
-    if not assignment:
-        return False
+    """Backwards-compatible wrapper around :func:`sat_utils.evaluate_solution`."""
 
-    for clause in clauses:
-        clause_satisfied = False
-        for lit in clause:
-            var = abs(lit)
-            if var not in assignment:
-                continue
-            value = assignment[var]
-            literal_truth = (lit > 0 and value) or (lit < 0 and not value)
-            if literal_truth:
-                clause_satisfied = True
-                break
-        if not clause_satisfied:
-            return False
-
-    return True
+    return evaluate_solution(clauses, assignment, status, consistent)
 
 
 def main() -> int:
