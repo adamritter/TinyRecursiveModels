@@ -13,6 +13,7 @@ import numpy as np
 from pysat.solvers import Solver
 
 from dataset.common import PuzzleDatasetMetadata
+from sat_utils import serialize_cnf
 
 NUM_VARS = 20
 TRAIN_NUM_EXAMPLES = 250000
@@ -210,9 +211,7 @@ def cadical_solve(clauses: List[List[int]]) -> Optional[List[int]]:
 
     with tempfile.NamedTemporaryFile(mode="w", suffix=".cnf", delete=False) as cnf_file:
         cnf_path = cnf_file.name
-        cnf_file.write(f"p cnf {max_var} {len(clauses)}\n")
-        for clause in clauses:
-            cnf_file.write(" ".join(str(lit) for lit in clause) + " 0\n")
+        cnf_file.write(serialize_cnf(max_var, clauses))
         cnf_file.flush()
 
     try:
@@ -547,9 +546,7 @@ def _print_problem(split: str, index: int) -> None:
     else:
         num_vars = NUM_VARS
 
-    print(f"p cnf {num_vars} {len(clauses)}")
-    for clause in clauses:
-        print(" ".join(str(lit) for lit in clause), "0")
+    print(serialize_cnf(num_vars, clauses), end="")
 
 
 def _print_solution(split: str, index: int) -> None:
