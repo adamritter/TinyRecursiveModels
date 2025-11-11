@@ -9,13 +9,14 @@ from __future__ import annotations
 
 import argparse
 import sys
-from typing import Dict, Iterable, List, Sequence, Tuple
+from typing import Dict, List, Sequence, TextIO, Tuple
 
 import math
 import numpy as np
 import torch
 from omegaconf import OmegaConf
 
+from sat_utils import parse_cnf
 from utils.functions import load_model_class
 
 NUM_VARS = 1000
@@ -37,42 +38,17 @@ DEFAULT_ARCH_OVERRIDES = {
 }
 
 
-def parse_dimacs(lines: Iterable[str]) -> Tuple[int, List[List[int]]]:
-    """Parse DIMACS CNF from the given lines."""
-    num_vars = None
-    clauses: List[List[int]] = []
-    current_clause: List[int] = []
+def load_cnf(stream: TextIO) -> Tuple[int, List[List[int]]]:
+    """Load and validate a DIMACS CNF instance from the provided stream."""
+    content = stream.read()
+    num_vars, clauses = parse_cnf(content)
 
-    for raw_line in lines:
-        line = raw_line.strip()
-        if not line or line.startswith("c"):
-            continue
-        if line.startswith("p"):
-            parts = line.split()
-            if len(parts) < 4 or parts[1].lower() != "cnf":
-                raise ValueError("Expected header of form 'p cnf <vars> <clauses>'.")
-            num_vars = int(parts[2])
-            continue
-
-        for token in line.split():
-            lit = int(token)
-            if lit == 0:
-                if not current_clause:
-                    raise ValueError("Encountered clause terminator without literals.")
-                if len(current_clause) != 3:
-                    raise ValueError("All clauses must contain exactly 3 literals.")
-                clauses.append(current_clause)
-                current_clause = []
-            else:
-                current_clause.append(lit)
-
-    if current_clause:
-        raise ValueError("unterminated clause at end of file.")
-
-    if num_vars is None:
-        raise ValueError("CNF header not found.")
     if not clauses:
         raise ValueError("No clauses provided.")
+
+    for clause in clauses:
+        if len(clause) != 3:
+            raise ValueError("All clauses must contain exactly 3 literals.")
 
     max_var = max(abs(lit) for clause in clauses for lit in clause)
     if max_var > NUM_VARS:
@@ -324,7 +300,7 @@ def main(argv: Sequence[str]) -> int:
 
     device = torch.device(args.device or ("cuda" if torch.cuda.is_available() else "cpu"))
 
-    num_vars, clauses = parse_dimacs(sys.stdin)
+    num_vars, clauses = load_cnf(sys.stdin)
     tokens, literal_positions, clause_literals, clause_positions = encode_problem(clauses)
 
     inputs = torch.from_numpy(tokens).unsqueeze(0).to(torch.int32)
