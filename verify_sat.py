@@ -14,18 +14,20 @@ from typing import Dict, List, Optional
 from sat_utils import parse_cnf, parse_solution
 
 
-def evaluate(
-    clauses: List[List[int]],
-    assignment: Dict[int, bool],
-    status: Optional[str],
-    consistent: bool,
-) -> bool:
+def evaluate(clauses: List[List[int]], literals: Optional[List[int]]) -> bool:
     """Return True if the assignment satisfies the clauses."""
-    if not consistent:
+
+    if literals is None:
         return False
-    if status == "unsatisfiable":
-        # Claimed UNSAT but an assignment was provided.
-        return False
+
+    assignment: Dict[int, bool] = {}
+    for lit in literals:
+        var = abs(lit)
+        value = lit > 0
+        if var in assignment and assignment[var] != value:
+            return False
+        assignment[var] = value
+
     if not clauses:
         return True
     if not assignment:
@@ -58,8 +60,8 @@ def main() -> int:
         cnf_content = Path(args.cnf).read_text(encoding="utf-8")
         solution_content = Path(args.solution).read_text(encoding="utf-8")
         _num_vars, clauses = parse_cnf(cnf_content)
-        assignment, status, consistent = parse_solution(solution_content)
-        ok = evaluate(clauses, assignment, status, consistent)
+        literals = parse_solution(solution_content)
+        ok = evaluate(clauses, literals)
     except Exception:
         ok = False
 

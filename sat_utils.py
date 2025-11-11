@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Dict, Iterable, List, Optional, Tuple
+from typing import Iterable, List, Optional, Tuple
 
 
 def parse_cnf(content: str) -> Tuple[int, List[List[int]]]:
@@ -41,11 +41,16 @@ def parse_cnf(content: str) -> Tuple[int, List[List[int]]]:
     return num_vars, clauses
 
 
-def parse_solution(content: str) -> Tuple[Dict[int, bool], Optional[str], bool]:
-    """Parse a DIMACS solution file content into ``(assignment, status, consistent)``."""
-    assignment: Dict[int, bool] = {}
+def parse_solution(content: str) -> Optional[List[int]]:
+    """Parse a DIMACS solution file content into a list of assignments.
+
+    The returned list contains the literals that form the assignment (e.g. ``1``
+    means variable 1 is ``True`` while ``-2`` means variable 2 is ``False``).
+    If the solver reports the instance as unsatisfiable, ``None`` is returned.
+    """
+
     status: Optional[str] = None
-    consistent = True
+    assignments: List[int] = []
 
     for raw_line in content.splitlines():
         stripped = raw_line.strip()
@@ -68,15 +73,12 @@ def parse_solution(content: str) -> Tuple[Dict[int, bool], Optional[str], bool]:
             lit = int(token)
             if lit == 0:
                 continue
+            assignments.append(lit)
 
-            var = abs(lit)
-            value = lit > 0
+    if status == "unsatisfiable":
+        return None
 
-            if var in assignment and assignment[var] != value:
-                consistent = False
-            assignment[var] = value
-
-    return assignment, status, consistent
+    return assignments
 
 
 __all__ = ["parse_cnf", "parse_solution"]
