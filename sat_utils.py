@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Dict, Iterable, List, Optional, Tuple
+from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 
 def parse_cnf(content: str) -> Tuple[int, List[List[int]]]:
@@ -79,5 +79,28 @@ def parse_solution(content: str) -> Tuple[Dict[int, bool], Optional[str], bool]:
     return assignment, status, consistent
 
 
-__all__ = ["parse_cnf", "parse_solution"]
+def serialize_cnf(num_vars: int, clauses: Sequence[Sequence[int]]) -> str:
+    """Serialize ``(num_vars, clauses)`` into DIMACS CNF format."""
+    if num_vars < 0:
+        raise ValueError("Number of variables must be non-negative.")
+
+    header = f"p cnf {num_vars} {len(clauses)}"
+    lines: List[str] = [header]
+
+    for clause in clauses:
+        if not clause:
+            raise ValueError("Clauses must contain at least one literal.")
+
+        serialized_literals: List[str] = []
+        for lit in clause:
+            if lit == 0:
+                raise ValueError("Literals must be non-zero in DIMACS CNF.")
+            serialized_literals.append(str(int(lit)))
+
+        lines.append(" ".join(serialized_literals + ["0"]))
+
+    return "\n".join(lines) + "\n"
+
+
+__all__ = ["parse_cnf", "parse_solution", "serialize_cnf"]
 
