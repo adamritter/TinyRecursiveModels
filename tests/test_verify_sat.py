@@ -12,7 +12,8 @@ if str(PROJECT_ROOT) not in sys.path:
 
 import pytest
 
-from verify_sat import evaluate, parse_cnf, parse_solution
+from sat_utils import parse_cnf, parse_solution
+from verify_sat import evaluate
 
 
 def write_tmp_file(tmp_path: Path, name: str, content: str) -> Path:
