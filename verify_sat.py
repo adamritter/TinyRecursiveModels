@@ -14,17 +14,6 @@ from typing import Dict, List, Optional
 from sat_utils import evaluate_solution, parse_cnf, parse_solution
 
 
-def evaluate(
-    clauses: List[List[int]],
-    assignment: Dict[int, bool],
-    status: Optional[str],
-    consistent: bool,
-) -> bool:
-    """Backwards-compatible wrapper around :func:`sat_utils.evaluate_solution`."""
-
-    return evaluate_solution(clauses, assignment, status, consistent)
-
-
 def main() -> int:
     parser = argparse.ArgumentParser(description="Verify a DIMACS CNF solution.")
     parser.add_argument("cnf", help="Path to the DIMACS CNF file.")
@@ -36,7 +25,7 @@ def main() -> int:
         solution_content = Path(args.solution).read_text(encoding="utf-8")
         _num_vars, clauses = parse_cnf(cnf_content)
         assignment, status, consistent = parse_solution(solution_content)
-        ok = evaluate(clauses, assignment, status, consistent)
+        ok = evaluate_solution(clauses, assignment, status, consistent)
     except Exception:
         ok = False
 
