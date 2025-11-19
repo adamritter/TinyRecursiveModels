@@ -441,6 +441,16 @@ def train_toy(
     training_start = time.perf_counter()
     last_test_time = training_start
 
+    HcInit = model.clause_init.unsqueeze(0).expand(num_clauses * batch_size, -1)
+    HlInit = model.literal_init.unsqueeze(0).expand(num_vars * batch_size * 2, -1)
+    Hc = HcInit.clone()
+    Hl = HlInit.clone()
+    step = torch.zeros(batch_size, device=device, dtype=torch.int32)
+    Ci = None
+    Lj = None
+    flip = None
+    target = None
+
     for epoch in range(1, epochs + 1):
         # ---- training ----
         model.train()
@@ -450,16 +460,6 @@ def train_toy(
         total_exact_acc = 0.0
         num_batches = 0
         compute_time_train = 0.0
-
-        HcInit = model.clause_init.unsqueeze(0).expand(num_clauses * batch_size, -1)
-        HlInit = model.literal_init.unsqueeze(0).expand(num_vars * batch_size * 2, -1)
-        Hc = HcInit.clone()
-        Hl = HlInit.clone()
-        step = torch.zeros(batch_size, device=device, dtype=torch.int32)
-        Ci = None
-        Lj = None
-        flip = None
-        target = None
 
         for batch_idx, batch in enumerate(train_loader, start=1):
             CiNew, LjNew, flipNew, targetNew, _, _, per_problem = (
