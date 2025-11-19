@@ -36,9 +36,9 @@ class OneLayerNeuroSAT(nn.Module):
         if self.use_layernorm:
             self.norm_c = nn.LayerNorm(d)
             self.norm_l = nn.LayerNorm(d)
-        # LSTM-style recurrence over message-passing steps
-        self.lstm_lit = nn.LSTMCell(d, d)
-        self.lstm_clause = nn.LSTMCell(d, d)
+        # GRU-style recurrence over message-passing steps
+        self.gru_lit = nn.GRUCell(d, d)
+        self.gru_clause = nn.GRUCell(d, d)
 
     def forward(self, Hc, Hl, Ci, Lj, flip_index, layer_multiplier=1.0):
         """
@@ -47,11 +47,9 @@ class OneLayerNeuroSAT(nn.Module):
         Ci -> Lj edges: two tensors (src, dst) of equal length Ecl
         flip_index : (2n,) tensor giving the index of ¬ℓ for each literal ℓ
         """
-        # Initialize hidden and cell states for clauses and literals
+        # Initialize hidden states for clauses and literals
         h_clause = Hc
-        c_clause = torch.zeros_like(Hc)
         h_lit = Hl
-        c_lit = torch.zeros_like(Hl)
 
         for _ in range(round(self.num_layers * layer_multiplier)):
             # -------- clause -> literal --------
@@ -62,18 +60,18 @@ class OneLayerNeuroSAT(nn.Module):
             # -------- literal -> neg-literal ("flip") --------
             agg_flip = self.Wflip(h_lit[flip_index])      # (2n, d)
 
-            # -------- update literals via LSTM cell --------
+            # -------- update literals via GRU cell --------
             lit_in = self.scale_lit * (agg_c2l + agg_flip)
-            h_lit, c_lit = self.lstm_lit(lit_in, (h_lit, c_lit))
+            h_lit = self.gru_lit(lit_in, h_lit)
 
             # -------- literal -> clause --------
             msg_l2c = self.Wl2c(h_lit)                    # (2n, d)
             agg_l2c = torch.zeros_like(h_clause)
             agg_l2c.index_add_(0, Ci, msg_l2c[Lj])        # aggregate onto clauses
 
-            # -------- update clauses via LSTM cell --------
+            # -------- update clauses via GRU cell --------
             clause_in = self.scale_clause * agg_l2c
-            h_clause, c_clause = self.lstm_clause(clause_in, (h_clause, c_clause))
+            h_clause = self.gru_clause(clause_in, h_clause)
 
             # -------- layer normalization (optional) --------
             if self.use_layernorm:
@@ -258,7 +256,7 @@ def train_toy(
     num_layers=5,
     test_layer_multiplier=1.0,
 ):
-    model = OneLayerNeuroSAT(d, use_layernorm=True, num_layers=num_layers)
+    model = OneLayerNeuroSAT(d, num_layers=num_layers)
     if torch.backends.mps.is_available():
         device = torch.device("mps")
     elif torch.cuda.is_available():
