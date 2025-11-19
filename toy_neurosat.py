@@ -496,9 +496,9 @@ def train_toy(
                 f"train_loss {train_loss:.4f} | "
                 f"train_acc {train_literal_acc:.3f} | "
                 f"train_exact_acc {train_exact_acc:.3f} | "
+                f"train_compute_s {compute_time_train:.3f} | "
             ),
         )
-        print(f"train_compute_s {compute_time_train:.3f}")
     return model
 
 
