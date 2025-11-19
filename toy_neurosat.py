@@ -518,11 +518,9 @@ def train_toy(
             num_batches += 1
 
             step += 1
-
             halt = exact_per_example | (step >= test_layer_multiplier)
 
-
-                    # Create expanded masks matching the flattened sizes
+            # Create expanded masks matching the flattened sizes
             halt_clauses = halt.repeat_interleave(num_clauses) # Shape: [B * clauses]
             halt_literals = halt.repeat_interleave(num_vars * 2) # Shape: [B * vars * 2]
 
