@@ -409,6 +409,10 @@ def train_toy(
         collate_fn=lambda batch: batch,
     )
 
+    # Global timer for mid-epoch tests (does not reset each epoch)
+    training_start = time.perf_counter()
+    last_test_time = training_start
+
     for epoch in range(1, epochs + 1):
         # ---- training ----
         model.train()
@@ -418,8 +422,6 @@ def train_toy(
         total_exact_acc = 0.0
         num_batches = 0
         compute_time_train = 0.0
-        epoch_start = time.perf_counter()
-        last_test_time = epoch_start
 
         for batch_idx, batch in enumerate(train_loader, start=1):
             Ci, Lj, flip, target, num_clauses_total, num_literals_total, per_problem = (
@@ -471,7 +473,7 @@ def train_toy(
                             loader=test_loader,
                             test_layer_multiplier=test_layer_multiplier,
                             print_prefix=(
-                                f"[mid-test] epoch {epoch} time {now - epoch_start:.1f}s "
+                                f"[mid-test] epoch {epoch} time {now - training_start:.1f}s "
                                 f"batch {batch_idx}/{len(train_loader)} | "
                                 f"train_loss {train_loss_so_far:.4f} | "
                                 f"train_acc {train_literal_acc_so_far:.3f} | "
