@@ -450,6 +450,7 @@ def train_toy(
     Lj = None
     flip = None
     target = None
+    current_test_layer_multiplier = 1
 
     for epoch in range(1, epochs + 1):
         # ---- training ----
@@ -518,7 +519,12 @@ def train_toy(
             num_batches += 1
 
             step += 1
-            halt = exact_per_example | (step >= test_layer_multiplier)
+            is_max = step >= current_test_layer_multiplier
+            halt = exact_per_example | is_max
+
+            if is_max.any() and current_test_layer_multiplier < test_layer_multiplier:
+                current_test_layer_multiplier += 1
+                print("Increasing train_layer_multiplier to", current_test_layer_multiplier)
 
             # Create expanded masks matching the flattened sizes
             halt_clauses = halt.repeat_interleave(num_clauses) # Shape: [B * clauses]
