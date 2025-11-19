@@ -1,4 +1,7 @@
 # toy_neurosat.py
+# These don't help: 2/3 layer MLP, skip connections, layer norm didn't really matter
+# Harder problem didn't help
+
 import argparse
 import os
 import sys
@@ -15,7 +18,7 @@ from torch.utils.data import DataLoader
 
 
 class OneLayerNeuroSAT(nn.Module):
-    def __init__(self, d=32, use_layernorm=True, num_layers=5):
+    def __init__(self, d=32, num_layers=5):
         super().__init__()
         # initial embeddings for all clauses and literals (shared)
         self.clause_init = nn.Parameter(torch.randn(d))
@@ -31,11 +34,9 @@ class OneLayerNeuroSAT(nn.Module):
         # learnable scales for residual updates
         self.scale_lit = nn.Parameter(torch.tensor(0.5, dtype=torch.float32))
         self.scale_clause = nn.Parameter(torch.tensor(0.5, dtype=torch.float32))
-        # optional normalization for more stable training
-        self.use_layernorm = use_layernorm
-        if self.use_layernorm:
-            self.norm_c = nn.LayerNorm(d)
-            self.norm_l = nn.LayerNorm(d)
+        # mandatory normalization for more stable training
+        self.norm_c = nn.LayerNorm(d)
+        self.norm_l = nn.LayerNorm(d)
         # GRU-style recurrence over message-passing steps
         self.gru_lit = nn.GRUCell(d, d)
         self.gru_clause = nn.GRUCell(d, d)
@@ -73,10 +74,9 @@ class OneLayerNeuroSAT(nn.Module):
             clause_in = self.scale_clause * agg_l2c
             h_clause = self.gru_clause(clause_in, h_clause)
 
-            # -------- layer normalization (optional) --------
-            if self.use_layernorm:
-                h_clause = self.norm_c(h_clause)
-                h_lit = self.norm_l(h_lit)
+            # -------- layer normalization --------
+            h_clause = self.norm_c(h_clause)
+            h_lit = self.norm_l(h_lit)
 
         # -------- read-out: score each literal from final h_lit --------
         scores = self.readout(h_lit).squeeze(-1)         # (2n,)
@@ -86,9 +86,13 @@ class OneLayerNeuroSAT(nn.Module):
 # ---------- utility: build tiny SAT problems ----------
 def random_3sat(num_vars=10, num_clauses=40):
     """
-    Returns: list[tuple[int]] of length num_clauses.
-             Each clause is a tuple of signed ints (e.g. -3 means ¬x3).
-             Guarantees satisfiable by sampling until it finds one.
+    Returns: (clauses, assignment) where:
+        - clauses: list[tuple[int]] of length num_clauses, each clause a tuple
+          of signed ints (e.g. -3 means ¬x3).
+        - assignment: tuple[int] giving a 0/1 value per variable.
+
+    Guarantees the formula is satisfiable with a UNIQUE satisfying assignment
+    by resampling until exactly one satisfying assignment is found.
     """
     lits = list(range(1, num_vars + 1))
     all_vars = set(lits)
@@ -107,9 +111,16 @@ def random_3sat(num_vars=10, num_clauses=40):
             continue
 
         # brute-force test (only feasible for toy sizes)
+        sat_assignment = None
+        sat_count = 0
         for assignment in product([0, 1], repeat=num_vars):
             if all(any((l > 0) == assignment[abs(l) - 1] for l in c) for c in clauses):
-                return clauses, assignment  # satisfiable formula + one witness
+                sat_count += 1
+                sat_assignment = assignment
+                if sat_count > 1:
+                    break
+        if sat_count == 1:
+            return clauses, sat_assignment  # satisfiable formula with unique witness
 
 
 def build_graph(clauses):
@@ -169,7 +180,7 @@ def generate_dataset(
     os.makedirs(cache_dir, exist_ok=True)
     filename = (
         f"toy_neurosat_dataset_size{dataset_size}_"
-        f"vars{num_vars}_clauses{num_clauses}_v2.pt"
+        f"vars{num_vars}_clauses{num_clauses}_v3.pt"
     )
     path = os.path.join(cache_dir, filename)
 
