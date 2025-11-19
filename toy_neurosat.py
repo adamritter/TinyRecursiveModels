@@ -259,7 +259,7 @@ def compute_literal_metrics(scores: torch.Tensor, target: torch.Tensor, per_prob
         per_problem: number of literals per SAT instance (2 * num_vars).
 
     Returns:
-        literal_accuracy (float), exact_accuracy (float)
+        literal_accuracy (float), exact_accuracy (float), exact_per_example (BoolTensor[B])
     """
     with torch.no_grad():
         batch_size_actual = target.size(0) // per_problem
@@ -275,13 +275,14 @@ def compute_literal_metrics(scores: torch.Tensor, target: torch.Tensor, per_prob
         target_true = target_pair[..., 0] > 0.5
 
         correct = (pred_true == target_true)
+        exact_per_example = correct.all(dim=1)  # (B,)
         literal_accuracy = correct.float().mean().item()
-        exact_accuracy = correct.all(dim=1).float().mean().item()
-    return literal_accuracy, exact_accuracy
+        exact_accuracy = exact_per_example.float().mean().item()
+    return literal_accuracy, exact_accuracy, exact_per_example
 
 
 def evaluate_on_loader(
-    model, device, loader, num_layers, print_prefix=None,
+    model, device, loader, num_layers, test_layer_multiplier, print_prefix=None,
 ):
     """
     Run evaluation over a DataLoader and return averaged loss and accuracies.
@@ -306,17 +307,47 @@ def evaluate_on_loader(
             flip = flip.to(device)
             target = target.to(device)
 
-            Hc = model.clause_init.unsqueeze(0).expand(num_clauses_total, -1)
-            Hl = model.literal_init.unsqueeze(0).expand(num_literals_total, -1)
+            Hc0 = model.clause_init.unsqueeze(0).expand(num_clauses_total, -1)
+            Hl0 = model.literal_init.unsqueeze(0).expand(num_literals_total, -1)
 
-            # apply a stack of num_layers one-step updates
-            for _ in range(num_layers):
-                Hl, Hc = model(Hc, Hl, Ci, Lj, flip)
-            scores = model.readout(Hl).squeeze(-1)
+            # "Cheating" test-time unrolls: per-example early stopping when exact.
+            B = target.size(0) // per_problem
+            solved = torch.zeros(B, dtype=torch.bool, device=device)
+            final_scores_view = torch.zeros(B, per_problem, device=device)
 
-            loss = F.binary_cross_entropy_with_logits(scores, target)
-            literal_accuracy, exact_accuracy = compute_literal_metrics(
-                scores, target, per_problem
+            Hl = Hl0
+            Hc = Hc0
+            scores_view = None
+
+            attempts = max(1, int(test_layer_multiplier))
+            for _attempt in range(attempts):
+                # advance all examples by num_layers steps
+                for _ in range(num_layers):
+                    Hl, Hc = model(Hc, Hl, Ci, Lj, flip)
+                scores = model.readout(Hl).squeeze(-1)
+                scores_view = scores.view(B, per_problem)
+
+                # compute per-example exactness for this attempt
+                _, _, exact_per_example = compute_literal_metrics(
+                    scores, target, per_problem
+                )
+
+                newly_solved = exact_per_example & ~solved
+                if newly_solved.any():
+                    final_scores_view[newly_solved] = scores_view[newly_solved]
+                    solved = solved | newly_solved
+                if solved.all():
+                    break
+
+            # any unsolved examples use the last attempt's scores
+            if not solved.all():
+                final_scores_view[~solved] = scores_view[~solved]
+
+            final_scores = final_scores_view.view(-1)
+
+            loss = F.binary_cross_entropy_with_logits(final_scores, target)
+            literal_accuracy, exact_accuracy, _ = compute_literal_metrics(
+                final_scores, target, per_problem
             )
 
             total_loss += loss.item()
@@ -350,6 +381,7 @@ def train_toy(
     dataset_size=1024,
     use_muon=False,
     num_layers=5,
+    test_layer_multiplier=1,
     test_every_s=0.0,
 ):
     model = OneLayerNeuroSAT(d)
@@ -444,7 +476,7 @@ def train_toy(
             for opt in optimizers:
                 opt.step()
 
-            literal_accuracy, exact_accuracy = compute_literal_metrics(
+            literal_accuracy, exact_accuracy, _ = compute_literal_metrics(
                 scores, target, per_problem
             )
 
@@ -462,20 +494,19 @@ def train_toy(
                     train_literal_acc_so_far = total_literal_acc / max(num_batches, 1)
                     train_exact_acc_so_far = total_exact_acc / max(num_batches, 1)
 
-                    mid_test_loss, mid_test_lit_acc, mid_test_exact_acc = (
-                        evaluate_on_loader(
-                            model=model,
-                            device=device,
-                            loader=test_loader,
-                            num_layers=num_layers,
-                            print_prefix=(
-                                f"[mid-test] epoch {epoch} time {now - training_start:.1f}s "
-                                f"batch {batch_idx}/{len(train_loader)} | "
-                                f"train_loss {train_loss_so_far:.4f} | "
-                                f"train_acc {train_literal_acc_so_far:.3f} | "
-                                f"train_exact_acc {train_exact_acc_so_far:.3f} | "
-                            ),
-                        )
+                    mid_test_loss, mid_test_lit_acc, mid_test_exact_acc = evaluate_on_loader(
+                        model=model,
+                        device=device,
+                        loader=test_loader,
+                        num_layers=num_layers,
+                        test_layer_multiplier=test_layer_multiplier,
+                        print_prefix=(
+                            f"[mid-test] epoch {epoch} time {now - training_start:.1f}s "
+                            f"batch {batch_idx}/{len(train_loader)} | "
+                            f"train_loss {train_loss_so_far:.4f} | "
+                            f"train_acc {train_literal_acc_so_far:.3f} | "
+                            f"train_exact_acc {train_exact_acc_so_far:.3f} | "
+                        ),
                     )
 
                     model.train()
@@ -491,6 +522,7 @@ def train_toy(
             device=device,
             loader=test_loader,
             num_layers=num_layers,
+            test_layer_multiplier=test_layer_multiplier,
             print_prefix=(
                 f"epoch {epoch} | "
                 f"train_loss {train_loss:.4f} | "
@@ -560,6 +592,13 @@ def main(argv):
         help="Use Muon optimizer for 2D parameters and Adam for the rest.",
     )
     parser.add_argument(
+        "--test-layer-multiplier",
+        type=int,
+        default=1,
+        help="Run test unrolls up to this many times per batch, "
+             "stopping early per example if an exact match is achieved.",
+    )
+    parser.add_argument(
         "--test-every-s",
         type=float,
         default=0.0,
@@ -577,6 +616,7 @@ def main(argv):
         dataset_size=args.iterations,
         use_muon=args.muon,
         num_layers=args.num_layers,
+        test_layer_multiplier=args.test_layer_multiplier,
         test_every_s=args.test_every_s,
     )
     return 0
