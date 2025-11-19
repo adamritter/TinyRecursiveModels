@@ -15,7 +15,7 @@ from torch.utils.data import DataLoader
 
 
 class OneLayerNeuroSAT(nn.Module):
-    def __init__(self, d=32, use_layernorm=True):
+    def __init__(self, d=32, use_layernorm=True, num_layers=5):
         super().__init__()
         # initial embeddings for all clauses and literals (shared)
         self.clause_init = nn.Parameter(torch.randn(d))
@@ -27,6 +27,7 @@ class OneLayerNeuroSAT(nn.Module):
         # read-out: scalar score per literal
         self.readout = nn.Linear(d, 1, bias=True)
         self.d = d
+        self.num_layers = num_layers
         # learnable scales for residual updates
         self.scale_lit = nn.Parameter(torch.tensor(0.5, dtype=torch.float32))
         self.scale_clause = nn.Parameter(torch.tensor(0.5, dtype=torch.float32))
@@ -35,41 +36,53 @@ class OneLayerNeuroSAT(nn.Module):
         if self.use_layernorm:
             self.norm_c = nn.LayerNorm(d)
             self.norm_l = nn.LayerNorm(d)
+        # LSTM-style recurrence over message-passing steps
+        self.lstm_lit = nn.LSTMCell(d, d)
+        self.lstm_clause = nn.LSTMCell(d, d)
 
-    def forward(self, Hc, Hl, Ci, Lj, flip_index):
+    def forward(self, Hc, Hl, Ci, Lj, flip_index, layer_multiplier=1.0):
         """
-        Hc : (m, d) clause embeddings
-        Hl : (2n, d) literal embeddings
+        Hc : (m, d) initial clause embeddings
+        Hl : (2n, d) initial literal embeddings
         Ci -> Lj edges: two tensors (src, dst) of equal length Ecl
         flip_index : (2n,) tensor giving the index of ¬ℓ for each literal ℓ
         """
-        # -------- clause -> literal --------
-        msg_c2l = self.Wc2l(Hc)                       # (m, d)
-        agg_c2l = torch.zeros_like(Hl)
-        agg_c2l.index_add_(0, Lj, msg_c2l[Ci])        # sum messages onto literals
+        # Initialize hidden and cell states for clauses and literals
+        h_clause = Hc
+        c_clause = torch.zeros_like(Hc)
+        h_lit = Hl
+        c_lit = torch.zeros_like(Hl)
 
-        # -------- literal -> neg-literal ("flip") --------
-        agg_flip = self.Wflip(Hl[flip_index])         # (2n, d)
+        for _ in range(round(self.num_layers * layer_multiplier)):
+            # -------- clause -> literal --------
+            msg_c2l = self.Wc2l(h_clause)                 # (m, d)
+            agg_c2l = torch.zeros_like(h_lit)
+            agg_c2l.index_add_(0, Lj, msg_c2l[Ci])        # sum messages onto literals
 
-        # -------- update literals --------
-        Hl = F.relu(Hl + self.scale_lit * (agg_c2l + agg_flip))
+            # -------- literal -> neg-literal ("flip") --------
+            agg_flip = self.Wflip(h_lit[flip_index])      # (2n, d)
 
-        # -------- literal -> clause --------
-        msg_l2c = self.Wl2c(Hl)                       # (2n, d)
-        agg_l2c = torch.zeros_like(Hc)
-        agg_l2c.index_add_(0, Ci, msg_l2c[Lj])        # aggregate onto clauses
+            # -------- update literals via LSTM cell --------
+            lit_in = self.scale_lit * (agg_c2l + agg_flip)
+            h_lit, c_lit = self.lstm_lit(lit_in, (h_lit, c_lit))
 
-        # -------- update clauses --------
-        Hc = F.relu(Hc + self.scale_clause * agg_l2c)
+            # -------- literal -> clause --------
+            msg_l2c = self.Wl2c(h_lit)                    # (2n, d)
+            agg_l2c = torch.zeros_like(h_clause)
+            agg_l2c.index_add_(0, Ci, msg_l2c[Lj])        # aggregate onto clauses
 
-        # -------- layer normalization (optional) --------
-        if self.use_layernorm:
-            Hc = self.norm_c(Hc)
-            Hl = self.norm_l(Hl)
+            # -------- update clauses via LSTM cell --------
+            clause_in = self.scale_clause * agg_l2c
+            h_clause, c_clause = self.lstm_clause(clause_in, (h_clause, c_clause))
 
-        # -------- read-out: score each literal --------
-        scores = self.readout(Hl).squeeze(-1)         # (2n,)
-        return scores, Hl, Hc
+            # -------- layer normalization (optional) --------
+            if self.use_layernorm:
+                h_clause = self.norm_c(h_clause)
+                h_lit = self.norm_l(h_lit)
+
+        # -------- read-out: score each literal from final h_lit --------
+        scores = self.readout(h_lit).squeeze(-1)         # (2n,)
+        return scores, h_lit, h_clause
 
 
 # ---------- utility: build tiny SAT problems ----------
@@ -243,8 +256,9 @@ def train_toy(
     dataset_size=1024,
     use_muon=False,
     num_layers=5,
+    test_layer_multiplier=1.0,
 ):
-    model = OneLayerNeuroSAT(d, use_layernorm=True)
+    model = OneLayerNeuroSAT(d, use_layernorm=True, num_layers=num_layers)
     if torch.backends.mps.is_available():
         device = torch.device("mps")
     elif torch.cuda.is_available():
@@ -319,9 +333,8 @@ def train_toy(
             Hl = model.literal_init.unsqueeze(0).expand(num_literals_total, -1)
 
             compute_start = time.perf_counter()
-            # apply OneLayerNeuroSAT multiple times (shared weights)
-            for _ in range(num_layers):
-                scores, Hl, Hc = model(Hc, Hl, Ci, Lj, flip)
+            # apply recurrent OneLayerNeuroSAT (LSTM-style) once with default depth
+            scores, Hl, Hc = model(Hc, Hl, Ci, Lj, flip)
 
             loss = F.binary_cross_entropy_with_logits(scores, target)
 
@@ -380,9 +393,9 @@ def train_toy(
                 Hl = model.literal_init.unsqueeze(0).expand(num_literals_total, -1)
 
                 compute_start = time.perf_counter()
-                scores, Hl, Hc = model(Hc, Hl, Ci, Lj, flip)
-                for _ in range(num_layers - 1):
-                    scores, Hl, Hc = model(Hc, Hl, Ci, Lj, flip)
+                scores, Hl, Hc = model(
+                    Hc, Hl, Ci, Lj, flip, layer_multiplier=test_layer_multiplier
+                )
 
                 loss = F.binary_cross_entropy_with_logits(scores, target)
 
@@ -476,6 +489,12 @@ def main(argv):
         action="store_true",
         help="Use Muon optimizer for 2D parameters and Adam for the rest.",
     )
+    parser.add_argument(
+        "--test-layer-multiplier",
+        type=float,
+        default=1.0,
+        help="Multiplier for the number of message-passing layers during evaluation.",
+    )
     args = parser.parse_args(argv)
 
     train_toy(
@@ -488,6 +507,7 @@ def main(argv):
         dataset_size=args.iterations,
         use_muon=args.muon,
         num_layers=args.num_layers,
+        test_layer_multiplier=args.test_layer_multiplier,
     )
     return 0
 
