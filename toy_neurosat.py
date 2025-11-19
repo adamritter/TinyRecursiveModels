@@ -1,6 +1,7 @@
 # toy_neurosat.py
 # These don't help: 2/3 layer MLP, skip connections, layer norm didn't really matter
 # Harder problem didn't help
+# python toy_neurosat.py --iterations 25000 --num-vars 7 --num-clauses 40 --lr 1e-3 --batch-size 64 --epochs 10 --dim 512 --muon --num-layers 16 --test-every-s 10 --test-layer-multiplier 6 --train-layer-multiplier 6
 
 import argparse
 import os
@@ -427,6 +428,7 @@ def train_toy(
         batch_size=batch_size,
         shuffle=True,
         collate_fn=lambda batch: batch,
+        drop_last=True,
     )
     test_loader = DataLoader(
         test_graphs,
@@ -449,18 +451,47 @@ def train_toy(
         num_batches = 0
         compute_time_train = 0.0
 
+        HcInit = model.clause_init.unsqueeze(0).expand(num_clauses * batch_size, -1)
+        HlInit = model.literal_init.unsqueeze(0).expand(num_vars * batch_size * 2, -1)
+        Hc = HcInit.clone()
+        Hl = HlInit.clone()
+        step = torch.zeros(batch_size, device=device, dtype=torch.int32)
+        Ci = None
+        Lj = None
+        flip = None
+        target = None
+
         for batch_idx, batch in enumerate(train_loader, start=1):
-            Ci, Lj, flip, target, num_clauses_total, num_literals_total, per_problem = (
+            CiNew, LjNew, flipNew, targetNew, _, _, per_problem = (
                 build_batch_from_samples(batch)
             )
 
-            Ci = Ci.to(device)
-            Lj = Lj.to(device)
-            flip = flip.to(device)
-            target = target.to(device)
+            CiNew = CiNew.to(device)
+            LjNew = LjNew.to(device)
+            flipNew = flipNew.to(device)
+            targetNew = targetNew.to(device)
 
-            Hc = model.clause_init.unsqueeze(0).expand(num_clauses_total, -1)
-            Hl = model.literal_init.unsqueeze(0).expand(num_literals_total, -1)
+            if Ci is None:
+                Ci = CiNew
+                Lj = LjNew
+                flip = flipNew
+                target = targetNew
+            else:
+                reset_mask = (step == 0)  # Shape: [batch_size] (Boolean)
+
+                if reset_mask.any():
+                    # 2. Expand masks for FLATTENED inputs
+                    # For Ci (Clauses): Expand mask to [Batch * num_clauses]
+                    reset_mask_clauses = reset_mask.repeat_interleave(num_clauses*3)
+                    
+                    # For Flip (Variables): Expand mask to [Batch * num_vars]
+                    reset_mask_vars = reset_mask.repeat_interleave(num_vars*2)
+
+                    # 3. Apply Updates using the Expanded Masks
+                    Ci[reset_mask_clauses] = CiNew[reset_mask_clauses]
+                    Lj[reset_mask_clauses] = LjNew[reset_mask_clauses]
+                    flip[reset_mask_vars] = flipNew[reset_mask_vars]
+                    target[reset_mask_vars] = targetNew[reset_mask_vars]
 
             compute_start = time.perf_counter()
             # apply a stack of num_layers one-step updates
@@ -476,7 +507,7 @@ def train_toy(
             for opt in optimizers:
                 opt.step()
 
-            literal_accuracy, exact_accuracy, _ = compute_literal_metrics(
+            literal_accuracy, exact_accuracy, exact_per_example = compute_literal_metrics(
                 scores, target, per_problem
             )
 
@@ -485,6 +516,25 @@ def train_toy(
             total_exact_acc += exact_accuracy
             compute_time_train += time.perf_counter() - compute_start
             num_batches += 1
+
+            step += 1
+
+            halt = exact_per_example | (step >= test_layer_multiplier)
+
+
+                    # Create expanded masks matching the flattened sizes
+            halt_clauses = halt.repeat_interleave(num_clauses) # Shape: [B * clauses]
+            halt_literals = halt.repeat_interleave(num_vars * 2) # Shape: [B * vars * 2]
+
+            # Detach history to stop backprop into past steps
+            Hc = Hc.detach()
+            Hl = Hl.detach()
+
+            # Reset only the halted parts to Init state
+            Hc[halt_clauses] = HcInit[halt_clauses]
+            Hl[halt_literals] = HlInit[halt_literals]
+
+            step = torch.where(halt, 0, step)
 
             # Optional mid-epoch evaluation based on wall-clock time
             if test_every_s > 0.0:
@@ -597,6 +647,13 @@ def main(argv):
         default=1,
         help="Run test unrolls up to this many times per batch, "
              "stopping early per example if an exact match is achieved.",
+    )
+    parser.add_argument(
+        "--train-layer-multiplier",
+        type=int,
+        default=1,
+        help="Run train unrolls up to this many times per batch, "
+             "halting and replacing solved examples.",
     )
     parser.add_argument(
         "--test-every-s",
