@@ -18,7 +18,7 @@ from torch.utils.data import DataLoader
 
 
 class OneLayerNeuroSAT(nn.Module):
-    def __init__(self, d=32, num_layers=5):
+    def __init__(self, d=32):
         super().__init__()
         # initial embeddings for all clauses and literals (shared)
         self.clause_init = nn.Parameter(torch.randn(d))
@@ -30,7 +30,6 @@ class OneLayerNeuroSAT(nn.Module):
         # read-out: scalar score per literal
         self.readout = nn.Linear(d, 1, bias=True)
         self.d = d
-        self.num_layers = num_layers
         # learnable scales for residual updates
         self.scale_lit = nn.Parameter(torch.tensor(0.5, dtype=torch.float32))
         self.scale_clause = nn.Parameter(torch.tensor(0.5, dtype=torch.float32))
@@ -43,45 +42,40 @@ class OneLayerNeuroSAT(nn.Module):
 
     def forward(self, Hc, Hl, Ci, Lj, flip_index):
         """
-        Hc : (m, d) initial clause embeddings
-        Hl : (2n, d) initial literal embeddings
+        Single message-passing step.
+
+        Hc : (m, d) clause embeddings
+        Hl : (2n, d) literal embeddings
         Ci -> Lj edges: two tensors (src, dst) of equal length Ecl
         flip_index : (2n,) tensor giving the index of ¬ℓ for each literal ℓ
         """
-        # Initialize hidden states for clauses and literals
-        h_clause = Hc
-        h_lit = Hl
+        # clause -> literal with skip connection
+        msg_c2l = Hc + self.Wc2l(Hc)                     # (m, d)
+        agg_c2l = torch.zeros_like(Hl)
+        agg_c2l.index_add_(0, Lj, msg_c2l[Ci])           # sum messages onto literals
 
-        for _ in range(self.num_layers):
-            # -------- clause -> literal --------
-            msg_c2l = h_clause + self.Wc2l(h_clause)     # (m, d) skip connection
-            agg_c2l = torch.zeros_like(h_lit)
-            agg_c2l.index_add_(0, Lj, msg_c2l[Ci])        # sum messages onto literals
+        # literal -> neg-literal ("flip") with skip connection
+        flip_in = Hl[flip_index]
+        agg_flip = flip_in + self.Wflip(flip_in)         # (2n, d)
 
-            # -------- literal -> neg-literal ("flip") --------
-            flip_in = h_lit[flip_index]
-            agg_flip = flip_in + self.Wflip(flip_in)      # (2n, d) skip connection
+        # update literals via GRU cell
+        lit_in = self.scale_lit * (agg_c2l + agg_flip)
+        Hl = self.gru_lit(lit_in, Hl)
 
-            # -------- update literals via GRU cell --------
-            lit_in = self.scale_lit * (agg_c2l + agg_flip)
-            h_lit = self.gru_lit(lit_in, h_lit)
+        # literal -> clause with skip connection
+        msg_l2c = Hl + self.Wl2c(Hl)                     # (2n, d)
+        agg_l2c = torch.zeros_like(Hc)
+        agg_l2c.index_add_(0, Ci, msg_l2c[Lj])           # aggregate onto clauses
 
-            # -------- literal -> clause --------
-            msg_l2c = h_lit + self.Wl2c(h_lit)           # (2n, d) skip connection
-            agg_l2c = torch.zeros_like(h_clause)
-            agg_l2c.index_add_(0, Ci, msg_l2c[Lj])        # aggregate onto clauses
+        # update clauses via GRU cell
+        clause_in = self.scale_clause * agg_l2c
+        Hc = self.gru_clause(clause_in, Hc)
 
-            # -------- update clauses via GRU cell --------
-            clause_in = self.scale_clause * agg_l2c
-            h_clause = self.gru_clause(clause_in, h_clause)
+        # layer normalization
+        Hc = self.norm_c(Hc)
+        Hl = self.norm_l(Hl)
 
-            # -------- layer normalization --------
-            h_clause = self.norm_c(h_clause)
-            h_lit = self.norm_l(h_lit)
-
-        # -------- read-out: score each literal from final h_lit --------
-        scores = self.readout(h_lit).squeeze(-1)         # (2n,)
-        return scores, h_lit, h_clause
+        return Hl, Hc
 
 
 # ---------- utility: build tiny SAT problems ----------
@@ -287,7 +281,7 @@ def compute_literal_metrics(scores: torch.Tensor, target: torch.Tensor, per_prob
 
 
 def evaluate_on_loader(
-    model, device, loader, test_layer_multiplier, print_prefix=None,
+    model, device, loader, num_layers, print_prefix=None,
 ):
     """
     Run evaluation over a DataLoader and return averaged loss and accuracies.
@@ -315,7 +309,10 @@ def evaluate_on_loader(
             Hc = model.clause_init.unsqueeze(0).expand(num_clauses_total, -1)
             Hl = model.literal_init.unsqueeze(0).expand(num_literals_total, -1)
 
-            scores, Hl, Hc = model(Hc, Hl, Ci, Lj, flip)
+            # apply a stack of num_layers one-step updates
+            for _ in range(num_layers):
+                Hl, Hc = model(Hc, Hl, Ci, Lj, flip)
+            scores = model.readout(Hl).squeeze(-1)
 
             loss = F.binary_cross_entropy_with_logits(scores, target)
             literal_accuracy, exact_accuracy = compute_literal_metrics(
@@ -355,7 +352,7 @@ def train_toy(
     num_layers=5,
     test_every_s=0.0,
 ):
-    model = OneLayerNeuroSAT(d, num_layers=num_layers)
+    model = OneLayerNeuroSAT(d)
     if torch.backends.mps.is_available():
         device = torch.device("mps")
     elif torch.cuda.is_available():
@@ -434,8 +431,10 @@ def train_toy(
             Hl = model.literal_init.unsqueeze(0).expand(num_literals_total, -1)
 
             compute_start = time.perf_counter()
-            # apply recurrent OneLayerNeuroSAT (LSTM-style) once with default depth
-            scores, Hl, Hc = model(Hc, Hl, Ci, Lj, flip)
+            # apply a stack of num_layers one-step updates
+            for _ in range(num_layers):
+                Hl, Hc = model(Hc, Hl, Ci, Lj, flip)
+            scores = model.readout(Hl).squeeze(-1)
 
             loss = F.binary_cross_entropy_with_logits(scores, target)
 
@@ -463,18 +462,20 @@ def train_toy(
                     train_literal_acc_so_far = total_literal_acc / max(num_batches, 1)
                     train_exact_acc_so_far = total_exact_acc / max(num_batches, 1)
 
-                    mid_test_loss, mid_test_lit_acc, mid_test_exact_acc = evaluate_on_loader(
-                        model=model,
-                        device=device,
-                        loader=test_loader,
-                        test_layer_multiplier=1.0,
-                        print_prefix=(
-                            f"[mid-test] epoch {epoch} time {now - training_start:.1f}s "
-                            f"batch {batch_idx}/{len(train_loader)} | "
-                            f"train_loss {train_loss_so_far:.4f} | "
-                            f"train_acc {train_literal_acc_so_far:.3f} | "
-                            f"train_exact_acc {train_exact_acc_so_far:.3f} | "
-                        ),
+                    mid_test_loss, mid_test_lit_acc, mid_test_exact_acc = (
+                        evaluate_on_loader(
+                            model=model,
+                            device=device,
+                            loader=test_loader,
+                            num_layers=num_layers,
+                            print_prefix=(
+                                f"[mid-test] epoch {epoch} time {now - training_start:.1f}s "
+                                f"batch {batch_idx}/{len(train_loader)} | "
+                                f"train_loss {train_loss_so_far:.4f} | "
+                                f"train_acc {train_literal_acc_so_far:.3f} | "
+                                f"train_exact_acc {train_exact_acc_so_far:.3f} | "
+                            ),
+                        )
                     )
 
                     model.train()
@@ -489,7 +490,7 @@ def train_toy(
             model=model,
             device=device,
             loader=test_loader,
-            test_layer_multiplier=1.0,
+            num_layers=num_layers,
             print_prefix=(
                 f"epoch {epoch} | "
                 f"train_loss {train_loss:.4f} | "
