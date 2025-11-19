@@ -41,7 +41,7 @@ class OneLayerNeuroSAT(nn.Module):
         self.gru_lit = nn.GRUCell(d, d)
         self.gru_clause = nn.GRUCell(d, d)
 
-    def forward(self, Hc, Hl, Ci, Lj, flip_index, layer_multiplier=1.0):
+    def forward(self, Hc, Hl, Ci, Lj, flip_index):
         """
         Hc : (m, d) initial clause embeddings
         Hl : (2n, d) initial literal embeddings
@@ -52,7 +52,7 @@ class OneLayerNeuroSAT(nn.Module):
         h_clause = Hc
         h_lit = Hl
 
-        for _ in range(round(self.num_layers * layer_multiplier)):
+        for _ in range(self.num_layers):
             # -------- clause -> literal --------
             msg_c2l = h_clause + self.Wc2l(h_clause)     # (m, d) skip connection
             agg_c2l = torch.zeros_like(h_lit)
@@ -315,9 +315,7 @@ def evaluate_on_loader(
             Hc = model.clause_init.unsqueeze(0).expand(num_clauses_total, -1)
             Hl = model.literal_init.unsqueeze(0).expand(num_literals_total, -1)
 
-            scores, Hl, Hc = model(
-                Hc, Hl, Ci, Lj, flip, layer_multiplier=test_layer_multiplier
-            )
+            scores, Hl, Hc = model(Hc, Hl, Ci, Lj, flip)
 
             loss = F.binary_cross_entropy_with_logits(scores, target)
             literal_accuracy, exact_accuracy = compute_literal_metrics(
@@ -355,7 +353,6 @@ def train_toy(
     dataset_size=1024,
     use_muon=False,
     num_layers=5,
-    test_layer_multiplier=1.0,
     test_every_s=0.0,
 ):
     model = OneLayerNeuroSAT(d, num_layers=num_layers)
@@ -466,20 +463,18 @@ def train_toy(
                     train_literal_acc_so_far = total_literal_acc / max(num_batches, 1)
                     train_exact_acc_so_far = total_exact_acc / max(num_batches, 1)
 
-                    mid_test_loss, mid_test_lit_acc, mid_test_exact_acc = (
-                        evaluate_on_loader(
-                            model=model,
-                            device=device,
-                            loader=test_loader,
-                            test_layer_multiplier=test_layer_multiplier,
-                            print_prefix=(
-                                f"[mid-test] epoch {epoch} time {now - training_start:.1f}s "
-                                f"batch {batch_idx}/{len(train_loader)} | "
-                                f"train_loss {train_loss_so_far:.4f} | "
-                                f"train_acc {train_literal_acc_so_far:.3f} | "
-                                f"train_exact_acc {train_exact_acc_so_far:.3f} | "
-                            ),
-                        )
+                    mid_test_loss, mid_test_lit_acc, mid_test_exact_acc = evaluate_on_loader(
+                        model=model,
+                        device=device,
+                        loader=test_loader,
+                        test_layer_multiplier=1.0,
+                        print_prefix=(
+                            f"[mid-test] epoch {epoch} time {now - training_start:.1f}s "
+                            f"batch {batch_idx}/{len(train_loader)} | "
+                            f"train_loss {train_loss_so_far:.4f} | "
+                            f"train_acc {train_literal_acc_so_far:.3f} | "
+                            f"train_exact_acc {train_exact_acc_so_far:.3f} | "
+                        ),
                     )
 
                     model.train()
@@ -494,7 +489,7 @@ def train_toy(
             model=model,
             device=device,
             loader=test_loader,
-            test_layer_multiplier=test_layer_multiplier,
+            test_layer_multiplier=1.0,
             print_prefix=(
                 f"epoch {epoch} | "
                 f"train_loss {train_loss:.4f} | "
@@ -564,12 +559,6 @@ def main(argv):
         help="Use Muon optimizer for 2D parameters and Adam for the rest.",
     )
     parser.add_argument(
-        "--test-layer-multiplier",
-        type=float,
-        default=1.0,
-        help="Multiplier for the number of message-passing layers during evaluation.",
-    )
-    parser.add_argument(
         "--test-every-s",
         type=float,
         default=0.0,
@@ -587,7 +576,6 @@ def main(argv):
         dataset_size=args.iterations,
         use_muon=args.muon,
         num_layers=args.num_layers,
-        test_layer_multiplier=args.test_layer_multiplier,
         test_every_s=args.test_every_s,
     )
     return 0
