@@ -54,19 +54,20 @@ class OneLayerNeuroSAT(nn.Module):
 
         for _ in range(round(self.num_layers * layer_multiplier)):
             # -------- clause -> literal --------
-            msg_c2l = self.Wc2l(h_clause)                 # (m, d)
+            msg_c2l = h_clause + self.Wc2l(h_clause)     # (m, d) skip connection
             agg_c2l = torch.zeros_like(h_lit)
             agg_c2l.index_add_(0, Lj, msg_c2l[Ci])        # sum messages onto literals
 
             # -------- literal -> neg-literal ("flip") --------
-            agg_flip = self.Wflip(h_lit[flip_index])      # (2n, d)
+            flip_in = h_lit[flip_index]
+            agg_flip = flip_in + self.Wflip(flip_in)      # (2n, d) skip connection
 
             # -------- update literals via GRU cell --------
             lit_in = self.scale_lit * (agg_c2l + agg_flip)
             h_lit = self.gru_lit(lit_in, h_lit)
 
             # -------- literal -> clause --------
-            msg_l2c = self.Wl2c(h_lit)                    # (2n, d)
+            msg_l2c = h_lit + self.Wl2c(h_lit)           # (2n, d) skip connection
             agg_l2c = torch.zeros_like(h_clause)
             agg_l2c.index_add_(0, Ci, msg_l2c[Lj])        # aggregate onto clauses
 
@@ -254,6 +255,95 @@ def build_batch_from_samples(samples):
     return Ci, Lj, flip, target, clause_offset, lit_offset, per_problem
 
 
+def compute_literal_metrics(scores: torch.Tensor, target: torch.Tensor, per_problem: int):
+    """
+    Compute literal-wise and exact accuracy from logits and targets.
+
+    Args:
+        scores: (B * per_problem,) logits for literals.
+        target: (B * per_problem,) target labels in {0,1}.
+        per_problem: number of literals per SAT instance (2 * num_vars).
+
+    Returns:
+        literal_accuracy (float), exact_accuracy (float)
+    """
+    with torch.no_grad():
+        batch_size_actual = target.size(0) // per_problem
+        scores_view = scores.view(batch_size_actual, per_problem)
+        target_view = target.view(batch_size_actual, per_problem)
+
+        num_vars = per_problem // 2
+        scores_pair = scores_view.view(batch_size_actual, num_vars, 2)
+        target_pair = target_view.view(batch_size_actual, num_vars, 2)
+
+        # per-variable decision: choose more confident between (pos, neg)
+        pred_true = (scores_pair[..., 0] >= scores_pair[..., 1])
+        target_true = target_pair[..., 0] > 0.5
+
+        correct = (pred_true == target_true)
+        literal_accuracy = correct.float().mean().item()
+        exact_accuracy = correct.all(dim=1).float().mean().item()
+    return literal_accuracy, exact_accuracy
+
+
+def evaluate_on_loader(
+    model, device, loader, test_layer_multiplier, print_prefix=None,
+):
+    """
+    Run evaluation over a DataLoader and return averaged loss and accuracies.
+
+    If print_prefix is provided, print a single summary line of the form
+    `{print_prefix}test_loss ... | test_acc ... | test_exact_acc ...`.
+    """
+    model.eval()
+    total_loss = 0.0
+    total_literal_acc = 0.0
+    total_exact_acc = 0.0
+    num_batches = 0
+
+    with torch.no_grad():
+        for batch in loader:
+            Ci, Lj, flip, target, num_clauses_total, num_literals_total, per_problem = (
+                build_batch_from_samples(batch)
+            )
+
+            Ci = Ci.to(device)
+            Lj = Lj.to(device)
+            flip = flip.to(device)
+            target = target.to(device)
+
+            Hc = model.clause_init.unsqueeze(0).expand(num_clauses_total, -1)
+            Hl = model.literal_init.unsqueeze(0).expand(num_literals_total, -1)
+
+            scores, Hl, Hc = model(
+                Hc, Hl, Ci, Lj, flip, layer_multiplier=test_layer_multiplier
+            )
+
+            loss = F.binary_cross_entropy_with_logits(scores, target)
+            literal_accuracy, exact_accuracy = compute_literal_metrics(
+                scores, target, per_problem
+            )
+
+            total_loss += loss.item()
+            total_literal_acc += literal_accuracy
+            total_exact_acc += exact_accuracy
+            num_batches += 1
+
+    avg_loss = total_loss / max(num_batches, 1)
+    avg_lit = total_literal_acc / max(num_batches, 1)
+    avg_exact = total_exact_acc / max(num_batches, 1)
+
+    if print_prefix is not None:
+        print(
+            f"{print_prefix}"
+            f"test_loss {avg_loss:.4f} | "
+            f"test_acc {avg_lit:.3f} | "
+            f"test_exact_acc {avg_exact:.3f}"
+        )
+
+    return avg_loss, avg_lit, avg_exact
+
+
 # ---------- tiny training loop (cross-entropy over literal pairs) ----------
 def train_toy(
     epochs=10,
@@ -266,6 +356,7 @@ def train_toy(
     use_muon=False,
     num_layers=5,
     test_layer_multiplier=1.0,
+    test_every_s=0.0,
 ):
     model = OneLayerNeuroSAT(d, num_layers=num_layers)
     if torch.backends.mps.is_available():
@@ -327,8 +418,10 @@ def train_toy(
         total_exact_acc = 0.0
         num_batches = 0
         compute_time_train = 0.0
+        epoch_start = time.perf_counter()
+        last_test_time = epoch_start
 
-        for batch in train_loader:
+        for batch_idx, batch in enumerate(train_loader, start=1):
             Ci, Lj, flip, target, num_clauses_total, num_literals_total, per_problem = (
                 build_batch_from_samples(batch)
             )
@@ -353,22 +446,9 @@ def train_toy(
             for opt in optimizers:
                 opt.step()
 
-            with torch.no_grad():
-                batch_size_actual = target.size(0) // (per_problem)
-                scores_view = scores.view(batch_size_actual, per_problem)
-                target_view = target.view(batch_size_actual, per_problem)
-
-                num_vars = per_problem // 2
-                scores_pair = scores_view.view(batch_size_actual, num_vars, 2)
-                target_pair = target_view.view(batch_size_actual, num_vars, 2)
-
-                # per-variable decision: choose more confident between (pos, neg)
-                pred_true = (scores_pair[..., 0] >= scores_pair[..., 1])
-                target_true = target_pair[..., 0] > 0.5
-
-                correct = (pred_true == target_true)
-                literal_accuracy = correct.float().mean().item()
-                exact_accuracy = correct.all(dim=1).float().mean().item()
+            literal_accuracy, exact_accuracy = compute_literal_metrics(
+                scores, target, per_problem
+            )
 
             total_loss += loss.item()
             total_literal_acc += literal_accuracy
@@ -376,68 +456,51 @@ def train_toy(
             compute_time_train += time.perf_counter() - compute_start
             num_batches += 1
 
+            # Optional mid-epoch evaluation based on wall-clock time
+            if test_every_s > 0.0:
+                now = time.perf_counter()
+                if now - last_test_time >= test_every_s:
+                    train_loss_so_far = total_loss / max(num_batches, 1)
+                    train_literal_acc_so_far = total_literal_acc / max(num_batches, 1)
+                    train_exact_acc_so_far = total_exact_acc / max(num_batches, 1)
+
+                    mid_test_loss, mid_test_lit_acc, mid_test_exact_acc = (
+                        evaluate_on_loader(
+                            model=model,
+                            device=device,
+                            loader=test_loader,
+                            test_layer_multiplier=test_layer_multiplier,
+                            print_prefix=(
+                                f"[mid-test] epoch {epoch} time {now - epoch_start:.1f}s "
+                                f"batch {batch_idx}/{len(train_loader)} | "
+                                f"train_loss {train_loss_so_far:.4f} | "
+                                f"train_acc {train_literal_acc_so_far:.3f} | "
+                                f"train_exact_acc {train_exact_acc_so_far:.3f} | "
+                            ),
+                        )
+                    )
+
+                    model.train()
+                    last_test_time = now
+
         train_loss = total_loss / max(num_batches, 1)
         train_literal_acc = total_literal_acc / max(num_batches, 1)
         train_exact_acc = total_exact_acc / max(num_batches, 1)
 
         # ---- evaluation on last 500 examples ----
-        model.eval()
-        test_loss = 0.0
-        test_literal_acc = 0.0
-        test_exact_acc = 0.0
-        test_batches = 0
-
-        with torch.no_grad():
-            for batch in test_loader:
-                Ci, Lj, flip, target, num_clauses_total, num_literals_total, per_problem = (
-                    build_batch_from_samples(batch)
-                )
-
-                Ci = Ci.to(device)
-                Lj = Lj.to(device)
-                flip = flip.to(device)
-                target = target.to(device)
-
-                Hc = model.clause_init.unsqueeze(0).expand(num_clauses_total, -1)
-                Hl = model.literal_init.unsqueeze(0).expand(num_literals_total, -1)
-
-                compute_start = time.perf_counter()
-                scores, Hl, Hc = model(
-                    Hc, Hl, Ci, Lj, flip, layer_multiplier=test_layer_multiplier
-                )
-
-                loss = F.binary_cross_entropy_with_logits(scores, target)
-
-                batch_size_actual = target.size(0) // (per_problem)
-                scores_view = scores.view(batch_size_actual, per_problem)
-                target_view = target.view(batch_size_actual, per_problem)
-
-                num_vars = per_problem // 2
-                scores_pair = scores_view.view(batch_size_actual, num_vars, 2)
-                target_pair = target_view.view(batch_size_actual, num_vars, 2)
-
-                pred_true = (scores_pair[..., 0] >= scores_pair[..., 1])
-                target_true = target_pair[..., 0] > 0.5
-
-                correct = (pred_true == target_true)
-                literal_accuracy = correct.float().mean().item()
-                exact_accuracy = correct.all(dim=1).float().mean().item()
-
-                test_loss += loss.item()
-                test_literal_acc += literal_accuracy
-                test_exact_acc += exact_accuracy
-                test_batches += 1
-
-        test_loss /= max(test_batches, 1)
-        test_literal_acc /= max(test_batches, 1)
-        test_exact_acc /= max(test_batches, 1)
-
-        print(
-            f"epoch {epoch} | "
-            f"train_loss {train_loss:.4f} | train_acc {train_literal_acc:.3f} | train_exact_acc {train_exact_acc:.3f} | "
-            f"test_loss {test_loss:.4f} | test_acc {test_literal_acc:.3f} | test_exact_acc {test_exact_acc:.3f} | "
-            f"train_compute_s {compute_time_train:.3f}"
+        test_loss, test_literal_acc, test_exact_acc = evaluate_on_loader(
+            model=model,
+            device=device,
+            loader=test_loader,
+            test_layer_multiplier=test_layer_multiplier,
+            print_prefix=(
+                f"epoch {epoch} | "
+                f"train_loss {train_loss:.4f} | "
+                f"train_acc {train_literal_acc:.3f} | "
+                f"train_exact_acc {train_exact_acc:.3f} | "
+            ),
         )
+        print(f"train_compute_s {compute_time_train:.3f}")
     return model
 
 
@@ -504,6 +567,12 @@ def main(argv):
         default=1.0,
         help="Multiplier for the number of message-passing layers during evaluation.",
     )
+    parser.add_argument(
+        "--test-every-s",
+        type=float,
+        default=0.0,
+        help="If >0, run evaluation every this many seconds inside each epoch.",
+    )
     args = parser.parse_args(argv)
 
     train_toy(
@@ -517,6 +586,7 @@ def main(argv):
         use_muon=args.muon,
         num_layers=args.num_layers,
         test_layer_multiplier=args.test_layer_multiplier,
+        test_every_s=args.test_every_s,
     )
     return 0
 
