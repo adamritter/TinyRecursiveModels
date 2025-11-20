@@ -35,8 +35,9 @@ def test_clause_satisfied_detects_truth() -> None:
 
 def test_evaluate_solution_requires_consistency() -> None:
     clauses = [[1, -2], [-1, 2]]
-    assignment = {1: True, 2: True}
-
-    assert evaluate_solution(clauses, assignment, "satisfiable", True) is True
-    assert evaluate_solution(clauses, assignment, "unsatisfiable", True) is False
-    assert evaluate_solution(clauses, assignment, "satisfiable", False) is False
+    # Satisfiable with a consistent assignment
+    assert evaluate_solution(clauses, [1, 2]) is True
+    # No solution provided
+    assert evaluate_solution(clauses, None) is False
+    # Inconsistent assignment (conflicting literals for the same variable)
+    assert evaluate_solution(clauses, [1, -1, 2]) is False
