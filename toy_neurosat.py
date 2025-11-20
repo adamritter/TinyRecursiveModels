@@ -424,6 +424,30 @@ def evaluate_on_loader(
 
     return avg_loss, avg_lit, avg_exact
 
+def create_optimizers(model, lr, use_muon: bool):
+    optimizers = []
+    if use_muon:
+        # Split parameters so 2D parameters can be optimized by Muon (or any
+        # 2D-only optimizer) and others by Adam.
+        params_2d = []
+        params_other = []
+        for p in model.parameters():
+            if p.ndim == 2:
+                params_2d.append(p)
+            else:
+                params_other.append(p)
+
+        if params_2d:
+            # Replace `torch.optim.Muon` with your Muon optimizer class if needed.
+            optimizers.append(torch.optim.Muon(params_2d, lr=lr))
+        if params_other:
+            optimizers.append(torch.optim.Adam(params_other, lr=lr))
+    else:
+        # Simple Adam on all parameters when not using Muon.
+        optimizers.append(torch.optim.Adam(model.parameters(), lr=lr))
+
+    return optimizers
+
 
 # ---------- tiny training loop (cross-entropy over literal pairs) ----------
 def train_toy(
@@ -479,26 +503,7 @@ def train_toy(
         )
         return model
 
-    optimizers = []
-    if use_muon:
-        # Split parameters so 2D parameters can be optimized by Muon (or any
-        # 2D-only optimizer) and others by Adam.
-        params_2d = []
-        params_other = []
-        for p in model.parameters():
-            if p.ndim == 2:
-                params_2d.append(p)
-            else:
-                params_other.append(p)
-
-        if params_2d:
-            # Replace `torch.optim.Muon` with your Muon optimizer class if needed.
-            optimizers.append(torch.optim.Muon(params_2d, lr=lr))
-        if params_other:
-            optimizers.append(torch.optim.Adam(params_other, lr=lr))
-    else:
-        # Simple Adam on all parameters when not using Muon.
-        optimizers.append(torch.optim.Adam(model.parameters(), lr=lr))
+    optimizers = create_optimizers(model, lr, use_muon)
 
     num_samples = len(graphs)
     test_size = min(500, num_samples // 2) if num_samples > 1 else 0
