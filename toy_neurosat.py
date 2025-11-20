@@ -1,21 +1,23 @@
 # toy_neurosat.py
 # These don't help: 2/3 layer MLP, skip connections, layer norm didn't really matter
 # Harder problem didn't help
-# python toy_neurosat.py --iterations 25000 --num-vars 7 --num-clauses 40 --lr 1e-3 --batch-size 64 --epochs 10 --dim 512 --muon --num-layers 16 --test-every-s 10 --test-layer-multiplier 6 --train-layer-multiplier 6
-
+# python toy_neurosat.py --iterations 25000 --num-vars 7 --num-clauses 40 --lr 1e-3 --batch-size 64 --epochs 10 --dim 512 --muon --num-layers 16 --test-every-s 10 --test-layer-multiplier 12 --train-layer-multiplier 6
+# python toy_neurosat.py --iterations 25000 --num-vars 20 --num-clauses 150 --lr 1e-3 --batch-size 64 --epochs 10 --dim 512 --muon --num-layers 16 --test-every-s 10 --test-layer-multiplier 12 --train-layer-multiplier 6 --save model20
+# large model was trained for 7 hours on GH200 by: python toy_neurosat.py --iterations 250000 --num-vars 20 --num-clauses 150 --lr 1e-3 --batch-size 64 --epochs 80 --dim 512 --muon --num-layers 16 --test-every-s 10 --test-layer-multiplier 12 --train-layer-multiplier 6 --save large_model
+# it overfits, test_exact_acc: 0 :)
 import argparse
 import os
 import sys
-import random
 import time
 from concurrent.futures import ThreadPoolExecutor
-from itertools import product, combinations
 
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
+
+from sat_utils import cadical_generate_unique, cadical_solve
 
 
 class OneLayerNeuroSAT(nn.Module):
@@ -90,33 +92,24 @@ def random_3sat(num_vars=10, num_clauses=40):
     Guarantees the formula is satisfiable with a UNIQUE satisfying assignment
     by resampling until exactly one satisfying assignment is found.
     """
-    lits = list(range(1, num_vars + 1))
-    all_vars = set(lits)
-    while True:
-        clauses = []
-        for _ in range(num_clauses):
-            clause = []
-            for _ in range(3):
-                v = random.choice(lits)
-                s = random.choice((1, -1))
-                clause.append(s * v)
-            clauses.append(tuple(clause))
+    all_vars = set(range(1, num_vars + 1))
 
+    while True:
+        clauses, solution = cadical_generate_unique(num_vars, num_clauses)
         used_vars = {abs(l) for c in clauses for l in c}
         if used_vars != all_vars:
+            # Enforce that every variable appears, matching the original generator.
             continue
 
-        # brute-force test (only feasible for toy sizes)
-        sat_assignment = None
-        sat_count = 0
-        for assignment in product([0, 1], repeat=num_vars):
-            if all(any((l > 0) == assignment[abs(l) - 1] for l in c) for c in clauses):
-                sat_count += 1
-                sat_assignment = assignment
-                if sat_count > 1:
-                    break
-        if sat_count == 1:
-            return clauses, sat_assignment  # satisfiable formula with unique witness
+        assignment = [0] * num_vars
+        for lit in solution:
+            v = abs(int(lit))
+            if 1 <= v <= num_vars:
+                assignment[v - 1] = 1 if lit > 0 else 0
+
+        # Convert to the original types: list[tuple[int]] and tuple[int]
+        clause_tuples = [tuple(map(int, c)) for c in clauses]
+        return clause_tuples, tuple(assignment)
 
 
 def build_graph(clauses):
@@ -165,6 +158,67 @@ def random_3sat_graph(num_vars=10, num_clauses=40):
     return clauses, assignment, n, m, Ci, Lj, flip
 
 
+def _solve_dataset_with_cadical(graphs):
+    """Solve all CNF instances in ``graphs`` with cadical_solve and return wall time."""
+
+    if not graphs:
+        return 0.0
+
+    def _solve_one(sample):
+        Ci, Lj, flip, target, num_clauses_total, num_literals, per_problem = sample
+        # Reconstruct clauses from the bipartite graph encoding.
+        # Literal index -> (var, sign): var = idx // 2 + 1, sign = +1 if idx % 2 == 0 else -1.
+        ci_list = Ci.tolist()
+        lj_list = Lj.tolist()
+        clauses = [[] for _ in range(num_clauses_total)]
+        for ci_idx, lit_idx in zip(ci_list, lj_list):
+            var = lit_idx // 2 + 1
+            sign = 1 if (lit_idx % 2) == 0 else -1
+            clauses[ci_idx].append(sign * var)
+        # Use cadical_solve; we ignore the result, only timing matters here.
+        _ = cadical_solve(clauses)
+
+    max_workers = min(32, (os.cpu_count() or 1), len(graphs))
+    start = time.perf_counter()
+    with ThreadPoolExecutor(max_workers=max_workers) as ex:
+        list(ex.map(_solve_one, graphs))
+    elapsed = time.perf_counter() - start
+    print(f"solve_time_s {elapsed:.3f}")
+    return elapsed
+
+
+def _evaluate_dataset_eval_only(
+    model,
+    device,
+    graphs,
+    batch_size,
+    num_layers,
+    test_layer_multiplier,
+):
+    """Evaluate ``model`` on all graphs and return wall time."""
+    if not graphs:
+        return 0.0
+
+    loader = DataLoader(
+        graphs,
+        batch_size=batch_size,
+        shuffle=False,
+        collate_fn=lambda batch: batch,
+    )
+    eval_start = time.perf_counter()
+    evaluate_on_loader(
+        model=model,
+        device=device,
+        loader=loader,
+        num_layers=num_layers,
+        test_layer_multiplier=test_layer_multiplier,
+        print_prefix="eval-only | ",
+    )
+    elapsed = time.perf_counter() - eval_start
+    print(f"eval_time_s {elapsed:.3f}")
+    return elapsed
+
+
 # ---------- dataset generation ----------
 def generate_dataset(
     num_vars=2,
@@ -199,7 +253,7 @@ def generate_dataset(
         per_problem = num_literals
         return Ci, Lj, flip, target, m, num_literals, per_problem
 
-    max_workers = min(32, (os.cpu_count() or 4), dataset_size)
+    max_workers = min((os.cpu_count() or 4), dataset_size)
     t0 = time.perf_counter()
     with ThreadPoolExecutor(max_workers=max_workers) as ex:
         dataset = list(ex.map(_make_one, range(dataset_size)))
@@ -383,7 +437,12 @@ def train_toy(
     use_muon=False,
     num_layers=5,
     test_layer_multiplier=1,
+    train_layer_multiplier=1,
     test_every_s=0.0,
+    increase_multiplier_slowly=True,
+    load_path=None,
+    eval_only=False,
+    solve_only=False,
 ):
     model = OneLayerNeuroSAT(d)
     if torch.backends.mps.is_available():
@@ -393,7 +452,32 @@ def train_toy(
     else:
         device = torch.device("cpu")
     print(f"Using device: {device}")
+
+    if load_path:
+        try:
+            state = torch.load(load_path, map_location=device)
+            model.load_state_dict(state)
+            print(f"Loaded model state_dict from {load_path}")
+        except Exception as exc:  # pylint: disable=broad-except
+            print(f"Warning: failed to load model from {load_path}: {exc}", file=sys.stderr)
+
     model.to(device)
+
+    graphs = generate_dataset(num_vars=num_vars, num_clauses=num_clauses, dataset_size=dataset_size)
+    if solve_only:
+        _solve_dataset_with_cadical(graphs)
+        return model
+
+    if eval_only:
+        _ = _evaluate_dataset_eval_only(
+            model=model,
+            device=device,
+            graphs=graphs,
+            batch_size=batch_size,
+            num_layers=num_layers,
+            test_layer_multiplier=test_layer_multiplier,
+        )
+        return model
 
     optimizers = []
     if use_muon:
@@ -416,7 +500,6 @@ def train_toy(
         # Simple Adam on all parameters when not using Muon.
         optimizers.append(torch.optim.Adam(model.parameters(), lr=lr))
 
-    graphs = generate_dataset(num_vars=num_vars, num_clauses=num_clauses, dataset_size=dataset_size)
     num_samples = len(graphs)
     test_size = min(500, num_samples // 2) if num_samples > 1 else 0
     split = num_samples - test_size
@@ -450,7 +533,10 @@ def train_toy(
     Lj = None
     flip = None
     target = None
-    current_test_layer_multiplier = 1
+    # set starting multiplier depending on flag:
+    # - if increase_multiplier_slowly: start at 1 and grow
+    # - otherwise: start directly at the requested train_layer_multiplier
+    current_train_layer_multiplier = 1 if increase_multiplier_slowly else train_layer_multiplier
 
     for epoch in range(1, epochs + 1):
         # ---- training ----
@@ -519,12 +605,12 @@ def train_toy(
             num_batches += 1
 
             step += 1
-            is_max = step >= current_test_layer_multiplier
+            is_max = step >= current_train_layer_multiplier
             halt = exact_per_example | is_max
 
-            if is_max.any() and current_test_layer_multiplier < test_layer_multiplier:
-                current_test_layer_multiplier += 1
-                print("Increasing train_layer_multiplier to", current_test_layer_multiplier)
+            if (is_max & exact_per_example).sum() > 0.5 and current_train_layer_multiplier < train_layer_multiplier:
+                current_train_layer_multiplier += 1
+                print("Increasing train_layer_multiplier to", current_train_layer_multiplier)
 
             # Create expanded masks matching the flattened sizes
             halt_clauses = halt.repeat_interleave(num_clauses) # Shape: [B * clauses]
@@ -656,8 +742,13 @@ def main(argv):
         "--train-layer-multiplier",
         type=int,
         default=1,
-        help="Run train unrolls up to this many times per batch, "
-             "halting and replacing solved examples.",
+        help="Target train unroll multiplier for the persistent pool.",
+    )
+    parser.add_argument(
+        "--no-increase-multiplier-slowly",
+        action="store_false",
+        dest="increase_multiplier_slowly",
+        help="If set, start training at the full train_layer_multiplier instead of ramping up from 1.",
     )
     parser.add_argument(
         "--test-every-s",
@@ -665,9 +756,31 @@ def main(argv):
         default=0.0,
         help="If >0, run evaluation every this many seconds inside each epoch.",
     )
+    parser.add_argument(
+        "--save",
+        type=str,
+        default=None,
+        help="If set, save the trained model's state_dict to this path at the end of training.",
+    )
+    parser.add_argument(
+        "--load",
+        type=str,
+        default=None,
+        help="If set, load a model state_dict from this path before training.",
+    )
+    parser.add_argument(
+        "--eval-only",
+        action="store_true",
+        help="If set, skip training and only evaluate on the full generated dataset.",
+    )
+    parser.add_argument(
+        "--solve-only",
+        action="store_true",
+        help="If set, skip training and model evaluation and instead solve all generated instances with cadical_solve, reporting wall-clock solve_time_s.",
+    )
     args = parser.parse_args(argv)
 
-    train_toy(
+    model = train_toy(
         epochs=args.epochs,
         d=args.dim,
         lr=args.lr,
@@ -678,8 +791,19 @@ def main(argv):
         use_muon=args.muon,
         num_layers=args.num_layers,
         test_layer_multiplier=args.test_layer_multiplier,
+        train_layer_multiplier=args.train_layer_multiplier,
         test_every_s=args.test_every_s,
+        increase_multiplier_slowly=args.increase_multiplier_slowly,
+        load_path=args.load,
+        eval_only=args.eval_only,
+        solve_only=args.solve_only,
     )
+    if args.save:
+        save_dir = os.path.dirname(args.save)
+        if save_dir:
+            os.makedirs(save_dir, exist_ok=True)
+        torch.save(model.state_dict(), args.save)
+        print(f"Saved model state_dict to {args.save}")
     return 0
 
 
