@@ -20,14 +20,11 @@ def main() -> int:
     parser.add_argument("solution", help="Path to the DIMACS solution file.")
     args = parser.parse_args()
 
-    try:
-        cnf_content = Path(args.cnf).read_text(encoding="utf-8")
-        solution_content = Path(args.solution).read_text(encoding="utf-8")
-        _num_vars, clauses = parse_cnf(cnf_content)
-        assignment, status, consistent = parse_solution(solution_content)
-        ok = evaluate_solution(clauses, assignment, status, consistent)
-    except Exception:
-        ok = False
+    cnf_content = Path(args.cnf).read_text(encoding="utf-8")
+    solution_content = Path(args.solution).read_text(encoding="utf-8")
+    _num_vars, clauses = parse_cnf(cnf_content)
+    assignment = parse_solution(solution_content)
+    ok = evaluate_solution(clauses, assignment)
 
     print("correct" if ok else "incorrect")
     return 0 if ok else 1
@@ -35,4 +32,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
