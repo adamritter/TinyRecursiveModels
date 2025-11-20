@@ -6,14 +6,12 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
-import subprocess
-import tempfile
 
 import numpy as np
 from pysat.solvers import Solver
 
 from dataset.common import PuzzleDatasetMetadata
-from sat_utils import serialize_cnf
+from sat_utils import cadical_solve, serialize_cnf
 
 NUM_VARS = 20
 TRAIN_NUM_EXAMPLES = 250000
@@ -194,62 +192,6 @@ def find_any_model(clauses: List[List[int]]) -> Optional[List[int]]:
         return model if model is not None else None
     finally:
         solver.delete()
-
-
-def cadical_solve(clauses: List[List[int]]) -> Optional[List[int]]:
-    """Solve CNF via external cadical; return a model or None if UNSAT."""
-    if not clauses:
-        return []
-
-    max_var = 0
-    for clause in clauses:
-        for lit in clause:
-            max_var = max(max_var, abs(lit))
-
-    if max_var == 0:
-        return []
-
-    with tempfile.NamedTemporaryFile(mode="w", suffix=".cnf", delete=False) as cnf_file:
-        cnf_path = cnf_file.name
-        cnf_file.write(serialize_cnf(max_var, clauses))
-        cnf_file.flush()
-
-    try:
-        try:
-            result = subprocess.run(
-                ["cadical", "-q", cnf_path],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                check=False,
-            )
-        except FileNotFoundError as err:
-            raise RuntimeError("cadical binary not found in PATH") from err
-
-        if result.returncode not in (10, 20):
-            raise RuntimeError(
-                f"cadical returned unexpected code {result.returncode}: {result.stderr.strip()}"
-            )
-
-        if result.returncode == 20 or "UNSAT" in result.stdout:
-            return None
-
-        model: List[int] = []
-        for line in result.stdout.splitlines():
-            line = line.strip()
-            if not line or line[0] != "v":
-                continue
-            for token in line.split()[1:]:
-                if token == "0":
-                    continue
-                model.append(int(token))
-
-        return model if model or result.returncode == 10 else None
-    finally:
-        try:
-            os.remove(cnf_path)
-        except OSError:
-            pass
 
 
 def find_unique_model(clauses: List[List[int]]) -> Optional[List[int]]:
