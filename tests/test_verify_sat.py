@@ -45,15 +45,11 @@ v 1 -2 0
     )
 
     _num_vars, clauses = parse_cnf(cnf_path.read_text(encoding="utf-8"))
-    assignment, status, consistent = parse_solution(
-        solution_path.read_text(encoding="utf-8")
-    )
+    assignment = parse_solution(solution_path.read_text(encoding="utf-8"))
 
     assert clauses == [[1, -2], [-2]]
-    assert assignment == {1: True, 2: False}
-    assert status == "satisfiable"
-    assert consistent is True
-    assert evaluate_solution(clauses, assignment, status, consistent) is True
+    assert assignment == [1, -2]
+    assert evaluate_solution(clauses, assignment) is True
 
 
 def test_verify_sat_rejects_inconsistent_assignment(tmp_path: Path) -> None:
@@ -74,12 +70,10 @@ def test_verify_sat_rejects_inconsistent_assignment(tmp_path: Path) -> None:
     )
 
     _num_vars, clauses = parse_cnf(cnf_path.read_text(encoding="utf-8"))
-    assignment, status, consistent = parse_solution(
-        solution_path.read_text(encoding="utf-8")
-    )
+    assignment = parse_solution(solution_path.read_text(encoding="utf-8"))
 
-    assert consistent is False
-    assert evaluate_solution(clauses, assignment, status, consistent) is False
+    assert assignment == [1, -1]
+    assert evaluate_solution(clauses, assignment) is False
 
 
 def test_verify_sat_rejects_unsatisfiable_claim(tmp_path: Path) -> None:
@@ -101,12 +95,10 @@ def test_verify_sat_rejects_unsatisfiable_claim(tmp_path: Path) -> None:
     )
 
     _num_vars, clauses = parse_cnf(cnf_path.read_text(encoding="utf-8"))
-    assignment, status, consistent = parse_solution(
-        solution_path.read_text(encoding="utf-8")
-    )
+    assignment = parse_solution(solution_path.read_text(encoding="utf-8"))
 
-    assert status == "unsatisfiable"
-    assert evaluate_solution(clauses, assignment, status, consistent) is False
+    assert assignment is None
+    assert evaluate_solution(clauses, assignment) is False
 
 
 def test_parse_cnf_requires_header(tmp_path: Path) -> None:
