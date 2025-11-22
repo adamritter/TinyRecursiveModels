@@ -32,6 +32,7 @@ class OneLayerNeuroSAT(nn.Module):
         self.Wflip = nn.Linear(d, d, bias=True)
         # read-out: scalar score per literal
         self.readout = nn.Linear(d, 1, bias=True)
+        self.halt = nn.Linear(d, 1, bias=True)
         self.d = d
         # learnable scales for residual updates
         self.scale_lit = nn.Parameter(torch.tensor(0.5, dtype=torch.float32))
@@ -450,7 +451,7 @@ def create_optimizers(model, lr, use_muon: bool):
 
 
 # ---------- tiny training loop (cross-entropy over literal pairs) ----------
-def train_toy(
+def train(
     epochs=10,
     d=32,
     lr=1e-3,
@@ -468,7 +469,9 @@ def train_toy(
     load_path=None,
     eval_only=False,
     solve_only=False,
+    use_act=False,
 ):
+
     model = OneLayerNeuroSAT(d)
     if torch.backends.mps.is_available():
         device = torch.device("mps")
@@ -539,6 +542,7 @@ def train_toy(
     Lj = None
     flip = None
     target = None
+    phalt_total = torch.zeros(batch_size, dtype=torch.float32, device=device)
     # set starting multiplier depending on flag:
     # - if increase_multiplier_slowly: start at 1 and grow
     # - otherwise: start directly at the requested train_layer_multiplier
@@ -585,14 +589,25 @@ def train_toy(
                     Lj[reset_mask_clauses] = LjNew[reset_mask_clauses]
                     flip[reset_mask_vars] = flipNew[reset_mask_vars]
                     target[reset_mask_vars] = targetNew[reset_mask_vars]
+                    phalt_total[reset_mask] = 0.0
 
             compute_start = time.perf_counter()
             # apply a stack of num_layers one-step updates
             for _ in range(num_layers):
                 Hl, Hc = model(Hc, Hl, Ci, Lj, flip)
             scores = model.readout(Hl).squeeze(-1)
-
-            loss = F.binary_cross_entropy_with_logits(scores, target)
+            if use_act:
+                phalt_current = torch.sigmoid(model.halt(Hl.reshape(batch_size, num_vars * 2, model.d).mean(dim=1).squeeze(-1)).squeeze(-1))
+                overflow_mask = (phalt_total + phalt_current) > 0.99
+                o = 1.0 - phalt_total[overflow_mask]
+                phalt_current = phalt_current.clone()
+                phalt_current[overflow_mask] = o
+                phalt_total = (phalt_total + phalt_current).detach()
+                losses = F.binary_cross_entropy_with_logits(scores, target, reduction='none').reshape(batch_size, num_vars * 2).mean(dim=1)
+                #print("Losses shape:", losses.shape)
+                loss = (losses * phalt_current).mean()
+            else:
+                loss = F.binary_cross_entropy_with_logits(scores, target)
             if const_train_loss != 0.0:
                 loss = loss + const_train_loss
 
@@ -615,6 +630,8 @@ def train_toy(
             step += 1
             is_max = step >= current_train_layer_multiplier
             halt = exact_per_example | is_max
+            if use_act:
+                halt = halt | overflow_mask
 
             if (is_max & exact_per_example).sum() > 0.5 and current_train_layer_multiplier < train_layer_multiplier:
                 current_train_layer_multiplier += 1
@@ -792,9 +809,14 @@ def main(argv):
         action="store_true",
         help="If set, skip training and model evaluation and instead solve all generated instances with cadical_solve, reporting wall-clock solve_time_s.",
     )
+    parser.add_argument(
+        "--act",
+        action="store_true",
+        help="If set, use adaptive computation time (ACT) during training.",
+    )
     args = parser.parse_args(argv)
 
-    model = train_toy(
+    model = train(
         epochs=args.epochs,
         d=args.dim,
         lr=args.lr,
@@ -812,6 +834,7 @@ def main(argv):
         load_path=args.load,
         eval_only=args.eval_only,
         solve_only=args.solve_only,
+        use_act=args.act,
     )
     if args.save:
         save_dir = os.path.dirname(args.save)
