@@ -463,7 +463,7 @@ def train_toy(
     test_layer_multiplier=1,
     train_layer_multiplier=1,
     test_every_s=0.0,
-    increase_multiplier_slowly=True,
+    increase_multiplier_slowly=False,
     const_train_loss=0.0,
     load_path=None,
     eval_only=False,
@@ -759,10 +759,10 @@ def main(argv):
         help="Constant value added to the training loss each step.",
     )
     parser.add_argument(
-        "--no-increase-multiplier-slowly",
-        action="store_false",
-        dest="increase_multiplier_slowly",
-        help="If set, start training at the full train_layer_multiplier instead of ramping up from 1.",
+        "--increase-multiplier-slowly",
+        action="store_true",
+        default=False,
+        help="If set, start training at 1 and slowly increase up to train_layer_multiplier.",
     )
     parser.add_argument(
         "--test-every-s",
