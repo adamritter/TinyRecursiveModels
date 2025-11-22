@@ -464,6 +464,7 @@ def train_toy(
     train_layer_multiplier=1,
     test_every_s=0.0,
     increase_multiplier_slowly=True,
+    const_train_loss=0.0,
     load_path=None,
     eval_only=False,
     solve_only=False,
@@ -592,6 +593,8 @@ def train_toy(
             scores = model.readout(Hl).squeeze(-1)
 
             loss = F.binary_cross_entropy_with_logits(scores, target)
+            if const_train_loss != 0.0:
+                loss = loss + const_train_loss
 
             for opt in optimizers:
                 opt.zero_grad()
@@ -750,6 +753,12 @@ def main(argv):
         help="Target train unroll multiplier for the persistent pool.",
     )
     parser.add_argument(
+        "--const-train-loss",
+        type=float,
+        default=0.0,
+        help="Constant value added to the training loss each step.",
+    )
+    parser.add_argument(
         "--no-increase-multiplier-slowly",
         action="store_false",
         dest="increase_multiplier_slowly",
@@ -799,6 +808,7 @@ def main(argv):
         train_layer_multiplier=args.train_layer_multiplier,
         test_every_s=args.test_every_s,
         increase_multiplier_slowly=args.increase_multiplier_slowly,
+        const_train_loss=args.const_train_loss,
         load_path=args.load,
         eval_only=args.eval_only,
         solve_only=args.solve_only,
