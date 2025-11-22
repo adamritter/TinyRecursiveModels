@@ -598,10 +598,12 @@ def train(
             scores = model.readout(Hl).squeeze(-1)
             if use_act:
                 phalt_current = torch.sigmoid(model.halt(Hl.reshape(batch_size, num_vars * 2, model.d).mean(dim=1).squeeze(-1)).squeeze(-1))
-                overflow_mask = (phalt_total + phalt_current) > 0.99
+                phalt_current_detach = phalt_current.detach()
+                overflow_mask = (phalt_total + phalt_current_detach) > 0.99
                 o = 1.0 - phalt_total[overflow_mask]
-                phalt_current = phalt_current.clone()
-                phalt_current[overflow_mask] = o
+                #phalt_current = phalt_current.clone()
+                #phalt_current[overflow_mask] = o
+                phalt_current = torch.where(overflow_mask, 1.0 - phalt_total, phalt_current)
                 phalt_total = (phalt_total + phalt_current).detach()
                 losses = F.binary_cross_entropy_with_logits(scores, target, reduction='none').reshape(batch_size, num_vars * 2).mean(dim=1)
                 #print("Losses shape:", losses.shape)
