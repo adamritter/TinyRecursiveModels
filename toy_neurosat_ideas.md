@@ -36,4 +36,4 @@ It doesn't incentivize the network to stop in itself for a hard problem, it stil
 
 ACT is more interesting:
 - Each step predicts a halting probability p for that step. They are added together, so it can predict the same at each step, and loss can be mutiplied with this prediction. This will incentivize p to be bigger for more correct steps and also loss to count as 1 for 1 item. The main disadvantage is that the network maybe won't learn as much from early steps, but it may be the right thing to do.
-- Const per each step is interesting as it should aready just improve as we don't need to learn as much when there already is exact match.
+- Const per each step is interesting as it should aready just improve as we don't need to learn as much when there already is exact match. I just tried it, it works, speeds up training 2x. It will be even better with early stopping.
