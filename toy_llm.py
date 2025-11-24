@@ -33,16 +33,18 @@ def get_args():
 
 # --- Data Generation ---
 class AdditionDataset(Dataset):
-    def __init__(self, size, ndigits, vocab):
+    def __init__(self, size, ndigits, vocab, device):
         self.size = size
         self.ndigits = ndigits
         self.vocab = vocab
         self.char_to_idx = {ch: i for i, ch in enumerate(vocab)}
         self.idx_to_char = {i: ch for i, ch in enumerate(vocab)}
+        self.device = device
         self.data = self._generate_data()
 
+
     def _generate_data(self):
-        dataset = []
+        rows = []
         seen = set()
         
         # Structure: "1234+5678=3579" (Fixed length)
@@ -50,7 +52,7 @@ class AdditionDataset(Dataset):
         
         self.seq_len = self.ndigits * 3 + 2
         
-        while len(dataset) < self.size:
+        while len(rows) < self.size:
             a, b = generate_ab(self.ndigits)
             res = a + b
             eqn = f"{a}+{b}={res}"
@@ -62,9 +64,10 @@ class AdditionDataset(Dataset):
             
             # Convert to indices
             indices = [self.char_to_idx[c] for c in eqn]
-            dataset.append(torch.tensor(indices, dtype=torch.long))
+            rows.append(torch.tensor(indices, dtype=torch.long))
             
-        return dataset
+        # Stack once and move the entire dataset to the target device
+        return torch.stack(rows, dim=0).to(self.device)
 
     def __len__(self):
         return len(self.data)
@@ -177,7 +180,7 @@ def evaluate_model(model, dataset, seq_len, ndigits, device, batch_size):
         dataset,
         batch_size=batch_size,
         shuffle=False,
-        pin_memory=device.type == 'cuda',
+        pin_memory=False,  # Data is already on the target device
     )
     
     with torch.no_grad():
@@ -214,9 +217,8 @@ def train(args):
     
     # Dataset: generate once and split into train/test
     total_size = args.train_size + args.test_size
-    full_dataset = AdditionDataset(total_size, args.ndigits, vocab)
+    full_dataset = AdditionDataset(total_size, args.ndigits, vocab, device)
     seq_len = full_dataset.seq_len
-    pin_memory = torch.cuda.is_available()
     train_dataset, test_dataset = random_split(
         full_dataset,
         [args.train_size, args.test_size],
@@ -227,13 +229,13 @@ def train(args):
         train_dataset,
         batch_size=args.batch_size,
         shuffle=True,
-        pin_memory=pin_memory,
+        pin_memory=False,  # Data tensors are already on device
     )
     test_loader = DataLoader(
         test_dataset,
         batch_size=args.batch_size,
         shuffle=False,
-        pin_memory=pin_memory,
+        pin_memory=False,  # Data tensors are already on device
     )
     
     # Model
