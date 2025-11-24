@@ -157,44 +157,6 @@ class ToyLLM(nn.Module):
 
 # --- Training & Evaluation ---
 
-def generate_equation(model, dataset, device, ndigits):
-    model.eval()
-    
-    # Create a random test case: "1234+5678="
-    a, b = generate_ab(ndigits)
-    prompt_str = f"{a:0{ndigits}d}+{b:0{ndigits}d}="
-    
-    # Expected result
-    expected_res = a + b
-    expected_full = f"{prompt_str}{expected_res:0{ndigits}d}"
-    
-    # Convert prompt to tensor
-    indices = [dataset.char_to_idx[c] for c in prompt_str]
-    input_tensor = torch.tensor(indices, dtype=torch.long).unsqueeze(0).to(device) # [1, SeqLen]
-    
-    print(f"\nPrompt: {prompt_str}")
-    
-    with torch.no_grad():
-        for _ in range(ndigits): # Generate exactly ndigits characters
-            output = model(input_tensor)
-            
-            # Get logits for the last token generated
-            next_token_logits = output[:, -1, :]
-            next_token = torch.argmax(next_token_logits, dim=-1).unsqueeze(0)
-            
-            # Append to input
-            input_tensor = torch.cat([input_tensor, next_token], dim=1)
-            
-    # Decode
-    generated_indices = input_tensor[0].cpu().numpy()
-    generated_str = "".join([dataset.idx_to_char[i] for i in generated_indices])
-    
-    is_correct = (generated_str == expected_full)
-    print(f"Generated: {generated_str}")
-    print(f"Expected:  {expected_full}")
-    print(f"Correct:   {is_correct}")
-    return is_correct
-
 def evaluate_model(model, data, seq_len, ndigits, batch_size):
     model.eval()
     correct_eq = 0
