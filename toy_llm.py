@@ -1,6 +1,7 @@
 import copy
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import torch.optim as optim
 from torch.utils.data import Dataset, random_split
 import random
@@ -99,6 +100,74 @@ class PositionalEncoding(nn.Module):
         return x + self.pe[:x.size(1), :].unsqueeze(0)
 
 
+def _get_activation_fn(name_or_fn):
+    if callable(name_or_fn):
+        return name_or_fn
+    if name_or_fn == "relu":
+        return F.relu
+    if name_or_fn == "gelu":
+        return F.gelu
+    raise ValueError(f"Unsupported activation {name_or_fn}")
+
+
+class MyTransformerEncoderLayer(nn.Module):
+    """
+    Custom Transformer encoder layer mirroring nn.TransformerEncoderLayer with batch_first support.
+    """
+
+    def __init__(
+        self,
+        d_model: int,
+        nhead: int,
+        dim_feedforward: int = 2048,
+        dropout: float = 0.1,
+        activation="relu",
+        batch_first: bool = True,
+        norm_first: bool = False,
+    ):
+        super().__init__()
+        self.self_attn = nn.MultiheadAttention(
+            d_model, nhead, dropout=dropout, batch_first=batch_first
+        )
+        self.linear1 = nn.Linear(d_model, dim_feedforward)
+        self.dropout = nn.Dropout(dropout)
+        self.linear2 = nn.Linear(dim_feedforward, d_model)
+
+        self.norm_first = norm_first
+        self.norm1 = nn.LayerNorm(d_model)
+        self.norm2 = nn.LayerNorm(d_model)
+        self.dropout1 = nn.Dropout(dropout)
+        self.dropout2 = nn.Dropout(dropout)
+        self.activation = _get_activation_fn(activation)
+
+    def forward(self, src, src_mask=None, src_key_padding_mask=None):
+        if self.norm_first:
+            return self._forward_pre_norm(src, src_mask, src_key_padding_mask)
+        return self._forward_post_norm(src, src_mask, src_key_padding_mask)
+
+    def _forward_post_norm(self, src, src_mask, src_key_padding_mask):
+        attn_out = self.self_attn(
+            src, src, src, attn_mask=src_mask, key_padding_mask=src_key_padding_mask, need_weights=False
+        )[0]
+        src = src + self.dropout1(attn_out)
+        src = self.norm1(src)
+        ff_out = self.linear2(self.dropout(self.activation(self.linear1(src))))
+        src = src + self.dropout2(ff_out)
+        src = self.norm2(src)
+        return src
+
+    def _forward_pre_norm(self, src, src_mask, src_key_padding_mask):
+        src_norm = self.norm1(src)
+        attn_out = self.self_attn(
+            src_norm, src_norm, src_norm, attn_mask=src_mask, key_padding_mask=src_key_padding_mask, need_weights=False
+        )[0]
+        src = src + self.dropout1(attn_out)
+        src_norm = self.norm2(src)
+        ff_out = self.linear2(self.dropout(self.activation(self.linear1(src_norm))))
+        src = src + self.dropout2(ff_out)
+        return src
+
+
 class MyTransformerEncoder(nn.Module):
     """
     Minimal Transformer encoder stack so we can customize/inspect layers directly.
@@ -132,7 +201,7 @@ class ToyLLM(nn.Module):
             torch.triu(torch.full((max_len, max_len), float('-inf')), diagonal=1),
             persistent=False,
         )
-        encoder_layer = nn.TransformerEncoderLayer(
+        encoder_layer = MyTransformerEncoderLayer(
             d_model=embed_dim,
             nhead=n_heads,
             dim_feedforward=hidden_dim,
@@ -141,15 +210,17 @@ class ToyLLM(nn.Module):
         self.transformer = MyTransformerEncoder(encoder_layer, num_layers=n_layers)
         self.fc_out = nn.Linear(embed_dim, vocab_size)
 
-    def forward(self, x):
+    def prepare_forward(self, x):
         # x shape: [Batch, SeqLen]
         # Causal Mask: Upper triangular is -inf
         seq_len = x.size(1)
         mask = self.causal_mask[:seq_len, :seq_len]
-
         emb = self.embedding(x)
         emb = self.pos_encoder(emb)
+        return emb, mask
 
+    def forward(self, x):
+        emb, mask = self.prepare_forward(x)
         # Transformer expects [Batch, Seq, Dim] because we set batch_first=True
         out = self.transformer(emb, mask=mask)
         logits = self.fc_out(out)
@@ -253,10 +324,13 @@ def train(args):
             idx = perm[start:end]
             x = train_inputs[idx]
             y = train_targets[idx]
+            emb, mask = model.prepare_forward(x)
 
             for opt in optimizers:
                 opt.zero_grad()
-            output = model(x)
+            
+            emb = model.transformer(emb, mask=mask)
+            output = model.fc_out(emb)
             
             # Output: [Batch, SeqLen, Vocab]
             # Target: [Batch, SeqLen]
@@ -266,6 +340,8 @@ def train(args):
             loss.backward()
             for opt in optimizers:
                 opt.step()
+            emb = emb.detach()
+
             total_train_loss += loss.item()
             num_train_batches += 1
         
