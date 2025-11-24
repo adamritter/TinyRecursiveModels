@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.utils.data import Dataset, DataLoader, random_split
+from torch.utils.data import Dataset, random_split
 import random
 import argparse
 import math
@@ -22,13 +22,13 @@ def get_args():
     parser.add_argument('--ndigits', type=int, default=4, help='Number of digits for addends (e.g., 4 for 1234+5678)')
     parser.add_argument('--train_size', type=int, default=10000, help='Number of training examples')
     parser.add_argument('--test_size', type=int, default=500, help='Number of test examples')
-    parser.add_argument('--batch_size', type=int, default=64, help='Batch size')
+    parser.add_argument('--batch_size', type=int, default=256, help='Batch size')
     parser.add_argument('--epochs', type=int, default=5, help='Number of training epochs')
     parser.add_argument('--lr', type=float, default=0.001, help='Learning rate')
-    parser.add_argument('--embed_dim', type=int, default=128, help='Embedding dimension')
-    parser.add_argument('--hidden_dim', type=int, default=256, help='Hidden dimension for transformer feedforward')
-    parser.add_argument('--n_layers', type=int, default=2, help='Number of transformer layers')
-    parser.add_argument('--n_heads', type=int, default=4, help='Number of attention heads')
+    parser.add_argument('--embed_dim', type=int, default=256, help='Embedding dimension')
+    parser.add_argument('--hidden_dim', type=int, default=512, help='Hidden dimension for transformer feedforward')
+    parser.add_argument('--n_layers', type=int, default=3, help='Number of transformer layers')
+    parser.add_argument('--n_heads', type=int, default=64, help='Number of attention heads')
     return parser.parse_args()
 
 # --- Data Generation ---
@@ -170,23 +170,22 @@ def generate_equation(model, dataset, device, ndigits):
     print(f"Correct:   {is_correct}")
     return is_correct
 
-def evaluate_model(model, dataset, seq_len, ndigits, device, batch_size):
+def evaluate_model(model, data, seq_len, ndigits, batch_size):
     model.eval()
     correct_eq = 0
     correct_chars = 0
     total_chars = 0
     prompt_len = seq_len - ndigits
-    loader = DataLoader(
-        dataset,
-        batch_size=batch_size,
-        shuffle=False,
-        pin_memory=False,  # Data is already on the target device
-    )
-    
+
+    x_all = data[:, :-1]
+    y_all = data[:, 1:]
+    total = data.size(0)
+
     with torch.no_grad():
-        for x, y in loader:
-            x = x.to(device, non_blocking=True)
-            y = y.to(device, non_blocking=True)
+        for start in range(0, total, batch_size):
+            end = min(start + batch_size, total)
+            x = x_all[start:end]
+            y = y_all[start:end]
 
             # Prompt is everything up to and including '='
             prompt = x[:, :prompt_len]
@@ -205,7 +204,7 @@ def evaluate_model(model, dataset, seq_len, ndigits, device, batch_size):
             correct_eq += matches.all(dim=1).sum().item()
     
     char_acc = correct_chars / total_chars if total_chars > 0 else 0.0
-    total_acc = correct_eq / len(dataset) if len(dataset) > 0 else 0.0
+    total_acc = correct_eq / total if total > 0 else 0.0
     return char_acc, total_acc
 
 def train(args):
@@ -224,19 +223,14 @@ def train(args):
         [args.train_size, args.test_size],
         generator=torch.Generator().manual_seed(42),
     )
-    
-    train_loader = DataLoader(
-        train_dataset,
-        batch_size=args.batch_size,
-        shuffle=True,
-        pin_memory=False,  # Data tensors are already on device
-    )
-    test_loader = DataLoader(
-        test_dataset,
-        batch_size=args.batch_size,
-        shuffle=False,
-        pin_memory=False,  # Data tensors are already on device
-    )
+    train_indices = torch.tensor(train_dataset.indices, device=device, dtype=torch.long)
+    test_indices = torch.tensor(test_dataset.indices, device=device, dtype=torch.long)
+    train_data = full_dataset.data.index_select(0, train_indices)
+    test_data = full_dataset.data.index_select(0, test_indices)
+    train_inputs = train_data[:, :-1]
+    train_targets = train_data[:, 1:]
+    test_inputs = test_data[:, :-1]
+    test_targets = test_data[:, 1:]
     
     # Model
     model = ToyLLM(
@@ -256,11 +250,15 @@ def train(args):
         epoch_start = time.time()
         model.train()
         total_train_loss = 0.0
+        num_train_batches = 0
         
-        for x, y in train_loader:
-            x = x.to(device, non_blocking=True)
-            y = y.to(device, non_blocking=True)
-            
+        perm = torch.randperm(train_inputs.size(0), device=device)
+        for start in range(0, train_inputs.size(0), args.batch_size):
+            end = min(start + args.batch_size, train_inputs.size(0))
+            idx = perm[start:end]
+            x = train_inputs[idx]
+            y = train_targets[idx]
+
             optimizer.zero_grad()
             output = model(x)
             
@@ -272,27 +270,31 @@ def train(args):
             loss.backward()
             optimizer.step()
             total_train_loss += loss.item()
+            num_train_batches += 1
         
-        avg_train_loss = total_train_loss / len(train_loader)
+        avg_train_loss = total_train_loss / max(num_train_batches, 1)
 
         # Evaluation: test loss
         model.eval()
         total_test_loss = 0.0
+        num_test_batches = 0
         with torch.no_grad():
-            for x, y in test_loader:
-                x = x.to(device, non_blocking=True)
-                y = y.to(device, non_blocking=True)
+            for start in range(0, test_inputs.size(0), args.batch_size):
+                end = min(start + args.batch_size, test_inputs.size(0))
+                x = test_inputs[start:end]
+                y = test_targets[start:end]
                 out = model(x)
                 test_loss = criterion(out.reshape(-1, len(vocab)), y.reshape(-1))
                 total_test_loss += test_loss.item()
-        avg_test_loss = total_test_loss / len(test_loader)
+                num_test_batches += 1
+        avg_test_loss = total_test_loss / max(num_test_batches, 1)
 
         # Evaluation: generation-based accuracies (train and test)
         train_char_acc, train_total_acc = evaluate_model(
-            model, train_dataset, seq_len, args.ndigits, device, args.batch_size
+            model, train_data, seq_len, args.ndigits, args.batch_size
         )
         test_char_acc, test_total_acc = evaluate_model(
-            model, test_dataset, seq_len, args.ndigits, device, args.batch_size
+            model, test_data, seq_len, args.ndigits, args.batch_size
         )
 
         epoch_time = time.time() - epoch_start
