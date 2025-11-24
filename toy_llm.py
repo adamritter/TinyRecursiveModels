@@ -24,7 +24,7 @@ def get_args():
     parser.add_argument('--test_size', type=int, default=500, help='Number of test examples')
     parser.add_argument('--batch_size', type=int, default=256, help='Batch size')
     parser.add_argument('--epochs', type=int, default=5, help='Number of training epochs')
-    parser.add_argument('--lr', type=float, default=0.001, help='Learning rate')
+    parser.add_argument('--lr', type=float, default=0.01, help='Learning rate')
     parser.add_argument('--embed_dim', type=int, default=256, help='Embedding dimension')
     parser.add_argument('--hidden_dim', type=int, default=512, help='Hidden dimension for transformer feedforward')
     parser.add_argument('--n_layers', type=int, default=3, help='Number of transformer layers')
@@ -243,7 +243,15 @@ def train(args):
     ).to(device)
     
     criterion = nn.CrossEntropyLoss()
-    optimizer = optim.Adam(model.parameters(), lr=args.lr)
+    params = list(model.parameters())
+    params_2d = [p for p in params if p.ndim == 2]
+    params_other = [p for p in params if p.ndim != 2]
+    optimizers = []
+    if params_2d:
+        optimizers.append(optim.Muon(params_2d, lr=args.lr))
+    if params_other:
+        # Muon only supports 2D parameters; fall back to Adam for biases, LayerNorm, etc.
+        optimizers.append(optim.Adam(params_other, lr=args.lr))
     
     # Training Loop
     for epoch in range(args.epochs):
@@ -259,7 +267,8 @@ def train(args):
             x = train_inputs[idx]
             y = train_targets[idx]
 
-            optimizer.zero_grad()
+            for opt in optimizers:
+                opt.zero_grad()
             output = model(x)
             
             # Output: [Batch, SeqLen, Vocab]
@@ -268,7 +277,8 @@ def train(args):
             loss = criterion(output.reshape(-1, len(vocab)), y.reshape(-1))
             
             loss.backward()
-            optimizer.step()
+            for opt in optimizers:
+                opt.step()
             total_train_loss += loss.item()
             num_train_batches += 1
         
