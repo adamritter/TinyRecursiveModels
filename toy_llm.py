@@ -1,3 +1,5 @@
+# toy_llm.py --n_layers 6 --epochs 100
+# 100% in epoch 44, 5s/epoch
 import copy
 import torch
 import torch.nn as nn
@@ -31,6 +33,7 @@ def get_args():
     parser.add_argument('--hidden_dim', type=int, default=512, help='Hidden dimension for transformer feedforward')
     parser.add_argument('--n_layers', type=int, default=3, help='Number of transformer layers')
     parser.add_argument('--n_heads', type=int, default=64, help='Number of attention heads')
+    parser.add_argument('--n_olayers', type=int, default=6, help='Number of output layers')
     return parser.parse_args()
 
 # --- Data Generation ---
@@ -139,6 +142,7 @@ class MyTransformerEncoderLayer(nn.Module):
         self.dropout1 = nn.Dropout(dropout)
         self.dropout2 = nn.Dropout(dropout)
         self.activation = _get_activation_fn(activation)
+        self.d_model = d_model
 
     def forward(self, src, src_mask=None, src_key_padding_mask=None):
         if self.norm_first:
@@ -178,14 +182,22 @@ class MyTransformerEncoder(nn.Module):
         super().__init__()
         if num_layers < 1:
             raise ValueError("num_layers must be >= 1")
-        self.encoder_layer = encoder_layer
-        self.num_layers = num_layers
+        self.layers = nn.ModuleList(copy.deepcopy(encoder_layer) for _ in range(num_layers))
+        self.gru_cells = nn.ModuleList(
+            nn.GRUCell(self.layers[0].d_model, self.layers[0].d_model) for _ in range(len(self.layers))
+        )
         self.norm = norm
 
     def forward(self, src, mask=None, src_key_padding_mask=None):
         output = src
-        for _ in range(self.num_layers):
-            output = self.encoder_layer(output, src_mask=mask, src_key_padding_mask=src_key_padding_mask)
+        for idx, mod in enumerate(self.layers):
+            layer_out = mod(output, src_mask=mask, src_key_padding_mask=src_key_padding_mask)
+            # GRU mixes previous layer output (hidden) with current layer output (input).
+            b, s, d = layer_out.shape
+            output = self.gru_cells[idx](
+                layer_out.reshape(-1, d),
+                output.reshape(-1, d),
+            ).view(b, s, d)
         if self.norm is not None:
             output = self.norm(output)
         return output
@@ -223,6 +235,7 @@ class ToyLLM(nn.Module):
         emb, mask = self.prepare_forward(x)
         # Transformer expects [Batch, Seq, Dim] because we set batch_first=True
         out = self.transformer(emb, mask=mask)
+        out = out + emb  # retain top-level skip from embeddings to logits
         logits = self.fc_out(out)
         return logits
 
@@ -326,21 +339,22 @@ def train(args):
             y = train_targets[idx]
             emb, mask = model.prepare_forward(x)
 
-            for opt in optimizers:
-                opt.zero_grad()
-            
-            emb = model.transformer(emb, mask=mask)
-            output = model.fc_out(emb)
-            
-            # Output: [Batch, SeqLen, Vocab]
-            # Target: [Batch, SeqLen]
-            # Flatten for Loss
-            loss = criterion(output.reshape(-1, len(vocab)), y.reshape(-1))
-            
-            loss.backward()
-            for opt in optimizers:
-                opt.step()
-            emb = emb.detach()
+            for _ in range(0, args.n_olayers):
+                for opt in optimizers:
+                    opt.zero_grad()
+                
+                emb = model.transformer(emb, mask=mask)
+                output = model.fc_out(emb)
+                
+                # Output: [Batch, SeqLen, Vocab]
+                # Target: [Batch, SeqLen]
+                # Flatten for Loss
+                loss = criterion(output.reshape(-1, len(vocab)), y.reshape(-1))
+                
+                loss.backward()
+                for opt in optimizers:
+                    opt.step()
+                emb = emb.detach()
 
             total_train_loss += loss.item()
             num_train_batches += 1
@@ -356,7 +370,10 @@ def train(args):
                 end = min(start + args.batch_size, test_inputs.size(0))
                 x = test_inputs[start:end]
                 y = test_targets[start:end]
-                out = model(x)
+                emb, mask = model.prepare_forward(x)
+                for _ in range(0, args.n_olayers):
+                    emb = model.transformer(emb, mask=mask)
+                out = model.fc_out(emb)
                 test_loss = criterion(out.reshape(-1, len(vocab)), y.reshape(-1))
                 total_test_loss += test_loss.item()
                 num_test_batches += 1
