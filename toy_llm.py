@@ -1,3 +1,4 @@
+import copy
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -97,6 +98,30 @@ class PositionalEncoding(nn.Module):
         # We assume Batch First for the main model, but handle dimension accordingly
         return x + self.pe[:x.size(1), :].unsqueeze(0)
 
+
+class MyTransformerEncoder(nn.Module):
+    """
+    Minimal Transformer encoder stack so we can customize/inspect layers directly.
+    Mirrors nn.TransformerEncoder behavior we rely on.
+    """
+
+    def __init__(self, encoder_layer: nn.TransformerEncoderLayer, num_layers: int, norm: nn.LayerNorm | None = None):
+        super().__init__()
+        if num_layers < 1:
+            raise ValueError("num_layers must be >= 1")
+        self.encoder_layer = encoder_layer
+        self.num_layers = num_layers
+        self.norm = norm
+
+    def forward(self, src, mask=None, src_key_padding_mask=None):
+        output = src
+        for _ in range(self.num_layers):
+            output = self.encoder_layer(output, src_mask=mask, src_key_padding_mask=src_key_padding_mask)
+        if self.norm is not None:
+            output = self.norm(output)
+        return output
+
+
 class ToyLLM(nn.Module):
     def __init__(self, vocab_size, embed_dim, hidden_dim, n_layers, n_heads, max_len):
         super().__init__()
@@ -113,7 +138,7 @@ class ToyLLM(nn.Module):
             dim_feedforward=hidden_dim,
             batch_first=True,
         )
-        self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=n_layers)
+        self.transformer = MyTransformerEncoder(encoder_layer, num_layers=n_layers)
         self.fc_out = nn.Linear(embed_dim, vocab_size)
 
     def forward(self, x):
