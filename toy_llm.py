@@ -1,5 +1,8 @@
 # toy_llm.py --n_layers 6 --epochs 100
 # 100% in epoch 44, 5s/epoch
+# This shows that just having more layers + backprop is not enough to learn addition, we need more tricks
+# - Early stopping for full match of solution
+# - 
 import copy
 import torch
 import torch.nn as nn
@@ -222,6 +225,9 @@ class ToyLLM(nn.Module):
         self.transformer = MyTransformerEncoder(encoder_layer, num_layers=n_layers)
         self.fc_out = nn.Linear(embed_dim, vocab_size)
 
+    def mask(self, sz):
+        return self.causal_mask[:sz, :sz]
+
     def prepare_forward(self, x):
         # x shape: [Batch, SeqLen]
         # Causal Mask: Upper triangular is -inf
@@ -229,10 +235,10 @@ class ToyLLM(nn.Module):
         mask = self.causal_mask[:seq_len, :seq_len]
         emb = self.embedding(x)
         emb = self.pos_encoder(emb)
-        return emb, mask
+        return emb
 
     def forward(self, x):
-        emb, mask = self.prepare_forward(x)
+        emb, mask = self.prepare_forward(x), self.mask(x.size(1))
         # Transformer expects [Batch, Seq, Dim] because we set batch_first=True
         out = self.transformer(emb, mask=mask)
         out = out + emb  # retain top-level skip from embeddings to logits
@@ -312,6 +318,7 @@ def train(args):
         n_heads=args.n_heads,
         max_len=full_dataset.seq_len,  # For Positional Encoding
     ).to(device)
+    mask = model.mask(seq_len-1).to(device)
     
     criterion = nn.CrossEntropyLoss()
     params = list(model.parameters())
@@ -337,7 +344,7 @@ def train(args):
             idx = perm[start:end]
             x = train_inputs[idx]
             y = train_targets[idx]
-            emb, mask = model.prepare_forward(x)
+            emb = model.prepare_forward(x)
 
             for _ in range(0, args.n_olayers):
                 for opt in optimizers:
@@ -370,7 +377,7 @@ def train(args):
                 end = min(start + args.batch_size, test_inputs.size(0))
                 x = test_inputs[start:end]
                 y = test_targets[start:end]
-                emb, mask = model.prepare_forward(x)
+                emb = model.prepare_forward(x)
                 for _ in range(0, args.n_olayers):
                     emb = model.transformer(emb, mask=mask)
                 out = model.fc_out(emb)
