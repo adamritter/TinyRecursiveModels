@@ -31,6 +31,17 @@ def generate_ab(ndigits, allow_plus1=True, allow_less_digits=True):
             continue
         return a, b
 
+def generate_ab_multiplication(ndigits, allow_less_digits=True):
+    ndigits1 = ndigits
+    ndigits2 = ndigits
+    if allow_less_digits:
+        ndigits1 = random.randint(1, ndigits)
+        ndigits2 = random.randint(1, ndigits)
+    while True:
+        a = random.randint(10**(ndigits1-1), 10**ndigits1 - 1)
+        b = random.randint(10**(ndigits2-1), 10**ndigits2 - 1)
+        return a, b
+
 # --- Configuration & Arguments ---
 def get_args():
     parser = argparse.ArgumentParser(description="Toy LLM for Addition (masked transformer only)")
@@ -49,11 +60,13 @@ def get_args():
     parser.add_argument('--allow-less-digits', action='store_true', help='Allow addends to use fewer digits than ndigits')
     parser.add_argument('--allow-plus1', action='store_true', help='Allow sums that overflow ndigits (one extra digit)')
     parser.add_argument('--mask', action='store_true', help='Use causal mask in transformer (off by default)')
+    parser.add_argument('--mul', action='store_true', help='Generate multiplication dataset instead of addition')
     return parser.parse_args()
 
 # --- Data Generation ---
 class AdditionDataset(Dataset):
-    def __init__(self, size, ndigits, vocab, device, allow_plus1=False, allow_less_digits=False, mask=False):
+    def __init__(self, size, ndigits, vocab, device, allow_plus1=False, allow_less_digits=False, mask=False,
+                 use_multiplication=False):
         self.size = size
         self.ndigits = ndigits
         self.vocab = vocab
@@ -62,9 +75,18 @@ class AdditionDataset(Dataset):
         self.device = device
         self.allow_plus1 = allow_plus1
         self.allow_less_digits = allow_less_digits
+        self.use_multiplication = use_multiplication
+        self.operator_char = '*' if self.use_multiplication else '+'
+        self.seq_len = self._compute_seq_len()
         self.data = self._generate_data()
         self.mask = mask
 
+    def _compute_seq_len(self):
+        if self.use_multiplication:
+            max_result_digits = self.ndigits * 2
+        else:
+            max_result_digits = self.ndigits + 1
+        return self.ndigits * 2 + max_result_digits + 2
 
 
     def _generate_data(self):
@@ -73,13 +95,14 @@ class AdditionDataset(Dataset):
         
         # Structure: "1234+5678=3579" (Fixed length)
         # Length = ndigits + 1 + ndigits + 1 + (ndigits) = 3 * ndigits + 2
-        
-        self.seq_len = self.ndigits * 3 + 3
-        
         while len(rows) < self.size:
-            a, b = generate_ab(self.ndigits, allow_plus1=self.allow_plus1, allow_less_digits=self.allow_less_digits)
-            res = a + b
-            eqn = f"{a}+{b}={res}"
+            if self.use_multiplication:
+                a, b = generate_ab_multiplication(self.ndigits, allow_less_digits=self.allow_less_digits)
+                res = a * b
+            else:
+                a, b = generate_ab(self.ndigits, allow_plus1=self.allow_plus1, allow_less_digits=self.allow_less_digits)
+                res = a + b
+            eqn = f"{a}{self.operator_char}{b}={res}"
             if len(eqn) > self.seq_len:
                 continue
             eqn = eqn.ljust(self.seq_len, ' ')  # Pad with spaces if needed
@@ -347,7 +370,7 @@ def train(args):
     print(f"Using device: {device}")
 
     # Vocab: 0-9, +, =, space
-    vocab = "0123456789+= "
+    vocab = "0123456789+=* " if args.mul else "0123456789+= "
     
     # Dataset: generate once and split into train/test
     total_size = args.train_size + args.test_size
@@ -359,6 +382,7 @@ def train(args):
         allow_plus1=args.allow_plus1,
         allow_less_digits=args.allow_less_digits,
         mask=args.mask,
+        use_multiplication=args.mul,
     )
     # Print some examples
     
