@@ -332,41 +332,87 @@ def train(args):
         optimizers.append(optim.Adam(params_other, lr=args.lr))
     
     # Training Loop
+    effective_batch_size = min(args.batch_size, train_inputs.size(0))
+    # Each epoch runs enough truncated steps so every example sees roughly n_olayers passes.
+    steps_per_epoch = math.ceil(train_inputs.size(0) / effective_batch_size) * args.n_olayers
+    # Persistent per-slot state
+    step = torch.zeros(effective_batch_size, device=device, dtype=torch.long)
+    current_x = torch.empty(effective_batch_size, train_inputs.size(1), dtype=torch.long, device=device)
+    current_y = torch.empty_like(current_x)
+    hidden = torch.zeros(effective_batch_size, train_inputs.size(1), args.embed_dim, device=device)
     for epoch in range(args.epochs):
         epoch_start = time.time()
         model.train()
         total_train_loss = 0.0
         num_train_batches = 0
-        
+        total_steps_to_halt = 0.0
+        total_halts = 0
+        step.zero_()
+        # Shuffle the pool of training examples each epoch
         perm = torch.randperm(train_inputs.size(0), device=device)
-        for start in range(0, train_inputs.size(0), args.batch_size):
-            end = min(start + args.batch_size, train_inputs.size(0))
-            idx = perm[start:end]
-            x = train_inputs[idx]
-            y = train_targets[idx]
-            emb = model.prepare_forward(x)
+        perm_cursor = 0
 
-            for _ in range(0, args.n_olayers):
-                for opt in optimizers:
-                    opt.zero_grad()
-                
-                emb = model.transformer(emb, mask=mask)
-                output = model.fc_out(emb)
-                
-                # Output: [Batch, SeqLen, Vocab]
-                # Target: [Batch, SeqLen]
-                # Flatten for Loss
-                loss = criterion(output.reshape(-1, len(vocab)), y.reshape(-1))
-                
-                loss.backward()
-                for opt in optimizers:
-                    opt.step()
-                emb = emb.detach()
+        def _draw_indices(k):
+            nonlocal perm, perm_cursor
+            if k == 0:
+                return perm[:0]
+            if perm_cursor + k > train_inputs.size(0):
+                perm = torch.randperm(train_inputs.size(0), device=device)
+                perm_cursor = 0
+            idx = perm[perm_cursor : perm_cursor + k]
+            perm_cursor += k
+            return idx
+        
+        # Initial fill
+        reset_mask = torch.ones(effective_batch_size, device=device, dtype=torch.bool)
+        if reset_mask.any():
+            idx = _draw_indices(reset_mask.sum().item())
+            current_x[reset_mask] = train_inputs[idx]
+            current_y[reset_mask] = train_targets[idx]
+            hidden[reset_mask] = model.prepare_forward(current_x[reset_mask])
+
+        for _ in range(steps_per_epoch):
+            reset_mask = step == 0
+            if reset_mask.any():
+                idx = _draw_indices(reset_mask.sum().item())
+                current_x[reset_mask] = train_inputs[idx]
+                current_y[reset_mask] = train_targets[idx]
+                hidden[reset_mask] = model.prepare_forward(current_x[reset_mask])
+
+            # Single truncated step; gradients do not flow across steps because we detach below.
+            for opt in optimizers:
+                opt.zero_grad()
+            
+            hidden = model.transformer(hidden, mask=mask)
+            output = model.fc_out(hidden)
+            
+            # Output: [Batch, SeqLen, Vocab]
+            # Target: [Batch, SeqLen]
+            # Flatten for Loss
+            loss = criterion(output.reshape(-1, len(vocab)), current_y.reshape(-1))
+            
+            loss.backward()
+            for opt in optimizers:
+                opt.step()
 
             total_train_loss += loss.item()
             num_train_batches += 1
+            with torch.no_grad():
+                preds = output.argmax(dim=-1)
+                # Halt when the predicted result digits match exactly or after n_olayers steps.
+                result_match = (preds[:, -args.ndigits:] == current_y[:, -args.ndigits:]).all(dim=1)
+                step = step + 1
+                halt = result_match | (step >= args.n_olayers)
+                # Track how many steps each halted example needed this epoch.
+                halted_steps = step[halt]
+                total_steps_to_halt += halted_steps.sum().item()
+                total_halts += halt.sum().item()
+                step = torch.where(halt, torch.zeros_like(step), step)
+                hidden = hidden.detach()
+                hidden[halt] = 0.0  # placeholder state until we refill next loop
         
         avg_train_loss = total_train_loss / max(num_train_batches, 1)
+        avg_steps_to_halt = total_steps_to_halt / max(total_halts, 1)
 
         # Evaluation: test loss
         model.eval()
@@ -403,7 +449,8 @@ def train(args):
             f"Train Char Acc: {train_char_acc*100:.2f}%, "
             f"Train Total Acc: {train_total_acc*100:.2f}%, "
             f"Test Char Acc: {test_char_acc*100:.2f}%, "
-            f"Test Total Acc: {test_total_acc*100:.2f}%"
+            f"Test Total Acc: {test_total_acc*100:.2f}%, "
+            f"Avg Steps: {avg_steps_to_halt:.2f}"
         )
     
 if __name__ == "__main__":
