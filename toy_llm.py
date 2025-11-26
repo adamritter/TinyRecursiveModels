@@ -280,15 +280,23 @@ class ToyLLM(nn.Module):
 
 # --- Training & Evaluation ---
 
-def evaluate_model(model, data, seq_len, ndigits, batch_size):
+def evaluate_model(model, data, seq_len, ndigits, batch_size, mask=False, n_olayers=1):
     model.eval()
     correct_eq = 0
     correct_chars = 0
     total_chars = 0
     prompt_len = seq_len - ndigits
 
-    x_all = data[:, :-1]
-    y_all = data[:, 1:]
+    if mask:
+        x_all = data[:, :-1]
+        y_all = data[:, 1:]
+    else:
+        x_all = data
+        y_all = data
+        # Find = in x and put spaces ater it
+        equal_pos = (x_all == model.embedding.num_embeddings - 3).nonzero(as_tuple=True)[1]
+        for i in range(x_all.size(0)):
+            x_all[i, equal_pos[i]+1:] = model.embedding.num_embeddings - 1  # space idx
     total = data.size(0)
 
     with torch.no_grad():
@@ -297,16 +305,26 @@ def evaluate_model(model, data, seq_len, ndigits, batch_size):
             x = x_all[start:end]
             y = y_all[start:end]
 
-            # Prompt is everything up to and including '='
-            prompt = x[:, :prompt_len]
-            generated = prompt
+            if mask:
+                # Prompt is everything up to and including '='
+                prompt = x[:, :prompt_len]
+                generated = prompt
 
-            for _ in range(ndigits):
-                out = model(generated)
-                next_tok = torch.argmax(out[:, -1, :], dim=-1, keepdim=True)
-                generated = torch.cat([generated, next_tok], dim=1)
+                for _ in range(ndigits):
+                    out = model(generated)
+                    next_tok = torch.argmax(out[:, -1, :], dim=-1, keepdim=True)
+                    generated = torch.cat([generated, next_tok], dim=1)
 
-            expected_full = torch.cat([x, y[:, -1:]], dim=1)
+                expected_full = torch.cat([x, y[:, -1:]], dim=1)
+            else:
+                #out = model(x)
+                emb = model.prepare_forward(x)
+                for _ in range(0, n_olayers):
+                    emb = model.transformer(emb, x=emb)
+                out = model.fc_out(emb)
+                generated = torch.argmax(out[:, -1, :], dim=-1, keepdim=True)
+                expected_full = y
+
             matches = generated == expected_full
 
             correct_chars += matches.sum().item()
@@ -336,27 +354,43 @@ def train(args):
         mask=args.mask,
     )
     # Print some examples
-    print("Some example data:")
-    for i in range(3):
-        x, y = full_dataset[i]
-        x_str = ''.join([vocab[idx.item()] for idx in x])
-        y_str = ''.join([vocab[idx.item()] for idx in y])
-        print(f"Input: {x_str} | Target: {y_str}")
+    
     seq_len = full_dataset.seq_len
     train_dataset, test_dataset = random_split(
         full_dataset,
         [args.train_size, args.test_size],
         generator=torch.Generator().manual_seed(42),
     )
+    eq_idx = full_dataset.char_to_idx['=']
+    space_idx = full_dataset.char_to_idx[' ']
     train_indices = torch.tensor(train_dataset.indices, device=device, dtype=torch.long)
     test_indices = torch.tensor(test_dataset.indices, device=device, dtype=torch.long)
     train_data = full_dataset.data.index_select(0, train_indices)
     test_data = full_dataset.data.index_select(0, test_indices)
-    train_inputs = train_data[:, :-1]
-    train_targets = train_data[:, 1:]
-    test_inputs = test_data[:, :-1]
-    test_targets = test_data[:, 1:]
+    if args.mask:
+        train_inputs = train_data[:, :-1]
+        train_targets = train_data[:, 1:]
+        test_inputs = test_data[:, :-1]
+        test_targets = test_data[:, 1:]
+    else:
+        train_targets = train_data
+        test_targets = test_data
+        # Find = in x and put spaces ater it
+        equal_pos = (train_data == full_dataset.char_to_idx['=']).nonzero(as_tuple=True)[1]
+        train_inputs = train_data.clone()
+        for i in range(train_inputs.size(0)):
+            train_inputs[i, equal_pos[i]+1:] = full_dataset.char_to_idx[' ']
+        equal_pos = (test_data == full_dataset.char_to_idx['=']).nonzero(as_tuple=True)[1]
+        test_inputs = test_data.clone()
+        for i in range(test_inputs.size(0)):
+            test_inputs[i, equal_pos[i]+1:] = full_dataset.char_to_idx[' ']
     
+    print("Some example data:")
+    for i in range(3):
+        x, y = train_inputs[i], train_targets[i]
+        x_str = ''.join([vocab[idx.item()] for idx in x])
+        y_str = ''.join([vocab[idx.item()] for idx in y])
+        print(f"Input: {x_str} | Target: {y_str}")
     # Model
     model = ToyLLM(
         vocab_size=len(vocab),
@@ -391,6 +425,7 @@ def train(args):
     current_x_embed = torch.empty(effective_batch_size, train_inputs.size(1), args.embed_dim, device=device)
     current_y = torch.empty_like(current_x)
     hidden = torch.zeros(effective_batch_size, train_inputs.size(1), args.embed_dim, device=device)
+    token_positions = torch.arange(train_inputs.size(1), device=device)
     for epoch in range(args.epochs):
         epoch_start = time.time()
         model.train()
@@ -398,6 +433,7 @@ def train(args):
         num_train_batches = 0
         total_steps_to_halt = 0.0
         total_halts = 0
+        results_match_halts = 0
         step.zero_()
         # Shuffle the pool of training examples each epoch
         perm = torch.randperm(train_inputs.size(0), device=device)
@@ -456,20 +492,22 @@ def train(args):
             num_train_batches += 1
             with torch.no_grad():
                 preds = output.argmax(dim=-1)
-                # Halt when the predicted result digits match exactly or after n_olayers steps.
-                result_match = (preds[:, -args.ndigits:] == current_y[:, -args.ndigits:]).all(dim=1)
+                match_mask = (preds == current_y)
+                result_match = match_mask.all(dim=1)
                 step = step + 1
-                halt = result_match | (step >= args.n_olayers)
+                halt =  (step >= args.n_olayers) | result_match
                 # Track how many steps each halted example needed this epoch.
                 halted_steps = step[halt]
                 total_steps_to_halt += halted_steps.sum().item()
                 total_halts += halt.sum().item()
+                results_match_halts += result_match.sum().item()
                 step = torch.where(halt, torch.zeros_like(step), step)
                 hidden = hidden.detach()
                 hidden[halt] = 0.0  # placeholder state until we refill next loop
         
         avg_train_loss = total_train_loss / max(num_train_batches, 1)
         avg_steps_to_halt = total_steps_to_halt / max(total_halts, 1)
+        avg_exact_match_rate = results_match_halts / max(total_halts, 1)
 
         # Evaluation: test loss
         model.eval()
@@ -492,10 +530,10 @@ def train(args):
 
         # Evaluation: generation-based accuracies (train and test)
         train_char_acc, train_total_acc = evaluate_model(
-            model, train_data, seq_len, args.ndigits, args.batch_size
+            model, train_data, seq_len, args.ndigits, args.batch_size, mask=args.mask, n_olayers=args.n_olayers
         )
         test_char_acc, test_total_acc = evaluate_model(
-            model, test_data, seq_len, args.ndigits, args.batch_size
+            model, test_data, seq_len, args.ndigits, args.batch_size, mask=args.mask, n_olayers=args.n_olayers
         )
 
         epoch_time = time.time() - epoch_start
@@ -508,7 +546,8 @@ def train(args):
             f"Test Loss: {avg_test_loss:.4f}, "
             f"char acc: {test_char_acc*100:.2f}%, "
             f"exact acc: {test_total_acc*100:.2f}%, "
-            f"Avg Steps: {avg_steps_to_halt:.2f}"
+            f"Avg Steps: {avg_steps_to_halt:.2f}, "
+            f"During training exact Match Rate: {avg_exact_match_rate*100:.2f}%"
         )
     
 if __name__ == "__main__":
