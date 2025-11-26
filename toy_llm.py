@@ -319,10 +319,17 @@ def evaluate_model(model, data, seq_len, ndigits, batch_size, mask=False, n_olay
             else:
                 #out = model(x)
                 emb = model.prepare_forward(x)
+                running_mask = torch.ones(x.size(0), dtype=torch.bool, device=x.device)
+                out = model.fc_out(emb)
                 for _ in range(0, n_olayers):
                     emb = model.transformer(emb, x=emb)
-                out = model.fc_out(emb)
-                generated = torch.argmax(out[:, -1, :], dim=-1, keepdim=True)
+                    #out = model.fc_out(emb)
+                    current_logits = model.fc_out(emb)
+                    out[running_mask] = current_logits[running_mask]
+                    preds = torch.argmax(current_logits, dim=2)
+                    matched = preds == y
+                    running_mask = running_mask & (~matched).any(dim=1)
+                generated = torch.argmax(out, dim=-1)
                 expected_full = y
 
             matches = generated == expected_full
