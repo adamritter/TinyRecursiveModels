@@ -252,6 +252,35 @@ def cadical_is_unique(clauses: List[List[int]], solution: List[int]) -> bool:
     alt_model = cadical_solve(clauses + [block_clause])
     return alt_model is None
 
+def random_3sat(num_vars=10, num_clauses=40):
+    """
+    Returns: (clauses, assignment) where:
+        - clauses: list[tuple[int]] of length num_clauses, each clause a tuple
+          of signed ints (e.g. -3 means ¬x3).
+        - assignment: tuple[int] giving a 0/1 value per variable.
+
+    Guarantees the formula is satisfiable with a UNIQUE satisfying assignment
+    by resampling until exactly one satisfying assignment is found.
+    """
+    all_vars = set(range(1, num_vars + 1))
+
+    while True:
+        clauses, solution = cadical_generate_unique(num_vars, num_clauses)
+        used_vars = {abs(l) for c in clauses for l in c}
+        if used_vars != all_vars:
+            # Enforce that every variable appears, matching the original generator.
+            continue
+
+        assignment = [0] * num_vars
+        for lit in solution:
+            v = abs(int(lit))
+            if 1 <= v <= num_vars:
+                assignment[v - 1] = 1 if lit > 0 else 0
+
+        # Convert to the original types: list[tuple[int]] and tuple[int]
+        clause_tuples = [tuple(map(int, c)) for c in clauses]
+        return clause_tuples, tuple(assignment)
+
 
 def cadical_generate_unique(
     nvars: int,

@@ -17,7 +17,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
 
-from sat_utils import cadical_generate_unique, cadical_solve
+from sat_utils import cadical_solve, random_3sat
 
 
 class OneLayerNeuroSAT(nn.Module):
@@ -83,34 +83,6 @@ class OneLayerNeuroSAT(nn.Module):
 
 
 # ---------- utility: build tiny SAT problems ----------
-def random_3sat(num_vars=10, num_clauses=40):
-    """
-    Returns: (clauses, assignment) where:
-        - clauses: list[tuple[int]] of length num_clauses, each clause a tuple
-          of signed ints (e.g. -3 means ¬x3).
-        - assignment: tuple[int] giving a 0/1 value per variable.
-
-    Guarantees the formula is satisfiable with a UNIQUE satisfying assignment
-    by resampling until exactly one satisfying assignment is found.
-    """
-    all_vars = set(range(1, num_vars + 1))
-
-    while True:
-        clauses, solution = cadical_generate_unique(num_vars, num_clauses)
-        used_vars = {abs(l) for c in clauses for l in c}
-        if used_vars != all_vars:
-            # Enforce that every variable appears, matching the original generator.
-            continue
-
-        assignment = [0] * num_vars
-        for lit in solution:
-            v = abs(int(lit))
-            if 1 <= v <= num_vars:
-                assignment[v - 1] = 1 if lit > 0 else 0
-
-        # Convert to the original types: list[tuple[int]] and tuple[int]
-        clause_tuples = [tuple(map(int, c)) for c in clauses]
-        return clause_tuples, tuple(assignment)
 
 
 def build_graph(clauses):
@@ -596,22 +568,25 @@ def train(
             for _ in range(num_layers):
                 Hl, Hc = model(Hc, Hl, Ci, Lj, flip)
             scores = model.readout(Hl).squeeze(-1)
+            literal_accuracy, exact_accuracy, exact_per_example = compute_literal_metrics(
+                scores, target, per_problem
+            )
             if use_act:
                 phalt_current = torch.sigmoid(model.halt(Hl.reshape(batch_size, num_vars * 2, model.d).mean(dim=1).squeeze(-1)).squeeze(-1))
                 phalt_current_detach = phalt_current.detach()
                 overflow_mask = (phalt_total + phalt_current_detach) > 0.99
-                o = 1.0 - phalt_total[overflow_mask]
-                #phalt_current = phalt_current.clone()
-                #phalt_current[overflow_mask] = o
-                phalt_current = torch.where(overflow_mask, 1.0 - phalt_total, phalt_current)
                 phalt_total = (phalt_total + phalt_current).detach()
                 losses = F.binary_cross_entropy_with_logits(scores, target, reduction='none').reshape(batch_size, num_vars * 2).mean(dim=1)
-                #print("Losses shape:", losses.shape)
-                loss = (losses * phalt_current).mean()
+                phalt_current_loss = torch.where(overflow_mask, 1.0 - phalt_total, phalt_current)
+                loss = ((losses * phalt_current_loss + (1.0 - phalt_current_loss) * const_train_loss ).mean()) * current_train_layer_multiplier
             else:
-                loss = F.binary_cross_entropy_with_logits(scores, target)
-            if const_train_loss != 0.0:
-                loss = loss + const_train_loss
+                losses = F.binary_cross_entropy_with_logits(scores, target, reduction='none').reshape(batch_size, num_vars * 2).mean(dim=1)
+                #losses = torch.where(exact_per_example, losses * 10.0, losses)
+                #loss = F.binary_cross_entropy_with_logits(scores, target)
+                loss = losses.mean()
+                if const_train_loss != 0.0:
+                    loss = loss + const_train_loss
+
 
             for opt in optimizers:
                 opt.zero_grad()
@@ -619,9 +594,6 @@ def train(
             for opt in optimizers:
                 opt.step()
 
-            literal_accuracy, exact_accuracy, exact_per_example = compute_literal_metrics(
-                scores, target, per_problem
-            )
 
             total_loss += loss.item()
             total_literal_acc += literal_accuracy
@@ -631,7 +603,7 @@ def train(
 
             step += 1
             is_max = step >= current_train_layer_multiplier
-            halt = exact_per_example | is_max
+            halt =  is_max | exact_per_example
             if use_act:
                 halt = halt | overflow_mask
 
