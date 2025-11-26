@@ -370,7 +370,7 @@ def train(args):
     print(f"Using device: {device}")
 
     # Vocab: 0-9, +, =, space
-    vocab = "0123456789+=* " if args.mul else "0123456789+= "
+    vocab = "0123456789+=* "
     
     # Dataset: generate once and split into train/test
     total_size = args.train_size + args.test_size
