@@ -61,12 +61,13 @@ def get_args():
     parser.add_argument('--allow-plus1', action='store_true', help='Allow sums that overflow ndigits (one extra digit)')
     parser.add_argument('--mask', action='store_true', help='Use causal mask in transformer (off by default)')
     parser.add_argument('--mul', action='store_true', help='Generate multiplication dataset instead of addition')
+    parser.add_argument('--first-char', action='store_true', help='Only keep first digit of result after "="')
     return parser.parse_args()
 
 # --- Data Generation ---
 class AdditionDataset(Dataset):
     def __init__(self, size, ndigits, vocab, device, allow_plus1=False, allow_less_digits=False, mask=False,
-                 use_multiplication=False):
+                 use_multiplication=False, first_char=False):
         self.size = size
         self.ndigits = ndigits
         self.vocab = vocab
@@ -76,6 +77,7 @@ class AdditionDataset(Dataset):
         self.allow_plus1 = allow_plus1
         self.allow_less_digits = allow_less_digits
         self.use_multiplication = use_multiplication
+        self.first_char = first_char
         self.operator_char = '*' if self.use_multiplication else '+'
         self.seq_len = self._compute_seq_len()
         self.data = self._generate_data()
@@ -102,7 +104,10 @@ class AdditionDataset(Dataset):
             else:
                 a, b = generate_ab(self.ndigits, allow_plus1=self.allow_plus1, allow_less_digits=self.allow_less_digits)
                 res = a + b
-            eqn = f"{a}{self.operator_char}{b}={res}"
+            res_str = str(res)
+            if self.first_char:
+                res_str = res_str[:1]
+            eqn = f"{a}{self.operator_char}{b}={res_str}"
             if len(eqn) > self.seq_len:
                 continue
             eqn = eqn.ljust(self.seq_len, ' ')  # Pad with spaces if needed
@@ -383,6 +388,7 @@ def train(args):
         allow_less_digits=args.allow_less_digits,
         mask=args.mask,
         use_multiplication=args.mul,
+        first_char=args.first_char,
     )
     # Print some examples
     
