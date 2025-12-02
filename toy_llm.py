@@ -18,6 +18,77 @@ import math
 import time
 
 
+def after_mask(matrix, element):
+    """
+    For each row, return True for positions strictly after the first occurrence of `element`.
+    If the element is not present in a row, that row is all False.
+    """
+    cond = matrix == element
+    has_elem = cond.any(dim=1)
+    first_idx = torch.where(
+        has_elem,
+        cond.float().argmax(dim=1),
+        torch.full((matrix.size(0),), matrix.size(1), device=matrix.device, dtype=torch.long),
+    )
+    positions = torch.arange(matrix.size(1), device=matrix.device)
+    return positions.unsqueeze(0) > first_idx.unsqueeze(1)
+
+from random import randint
+
+def sample_pair_with_carry(n, k):
+    """Return two n-digit integers (as lists of digits, LSD first)
+       whose longest carry chain is exactly k (0-based)."""
+
+    a, b, carry = [], [], 0
+    # positions 0 … k-1  must produce a carry
+    for _ in range(k):
+        d = randint(0, 9)          # digit of a
+        a.append(d)
+        bb = randint(10, 19) - d - carry
+        if bb > 9:
+            bb = 9
+        b.append(bb)
+        carry = 1                  # still in the chain
+    # position k ends the chain: no carry out
+    d = randint(0, 8)              # 0-8 guarantees we can kill the chain
+    a.append(d)
+    b.append(randint(0, 8 - d))    # make sure sum < 9 – carry
+    carry = 0
+    # remaining more-significant digits are unconstrained
+    for _ in range(k + 1, n):
+        a.append(randint(0, 9))
+        b.append(randint(0, 9))
+    return a[::-1], b[::-1]        # reverse to MSD-first if you prefer
+
+
+def generate_ab_carry_older(ndigits, allow_plus1=True, allow_less_digits=True):
+    if allow_less_digits:
+        ndigits = random.randint(1, ndigits)
+    k=random.randint(0, ndigits)
+    al, bl = sample_pair_with_carry(ndigits, k)
+    a=0
+    b=0
+    for d in al:
+        a*=10
+        a+=d
+    for d in bl:
+            b*=10
+            b+=d
+    return a, b
+
+def generate_ab_carry(ndigits, allow_plus1=True, allow_less_digits=True):
+    # No carry version for now
+    a = 0
+    b = 0
+    # Now it's time to introduce carries
+    for i in range(ndigits):
+        min = 1 if (i == 0) else 0
+        aa=randint(min, 9-min)
+        bb=randint(min, 9-aa)
+        a=a*10+aa
+        b=b*10+bb
+    return a, b
+
 def generate_ab(ndigits, allow_plus1=True, allow_less_digits=True):
     ndigits1 = ndigits
     ndigits2 = ndigits
@@ -62,12 +133,14 @@ def get_args():
     parser.add_argument('--mask', action='store_true', help='Use causal mask in transformer (off by default)')
     parser.add_argument('--mul', action='store_true', help='Generate multiplication dataset instead of addition')
     parser.add_argument('--first-char', action='store_true', help='Only keep first digit of result after "="')
+    parser.add_argument('--div', action='store_true', help='Generate division dataset (c/b=a) based on multiplication factors')
+    parser.add_argument('--add-carry', action='store_true', help='Add using sampling with carry')
     return parser.parse_args()
 
 # --- Data Generation ---
 class AdditionDataset(Dataset):
     def __init__(self, size, ndigits, vocab, device, allow_plus1=False, allow_less_digits=False, mask=False,
-                 use_multiplication=False, first_char=False):
+                 use_add_carry=False, use_multiplication=False, use_division=False, first_char=False):
         self.size = size
         self.ndigits = ndigits
         self.vocab = vocab
@@ -76,15 +149,22 @@ class AdditionDataset(Dataset):
         self.device = device
         self.allow_plus1 = allow_plus1
         self.allow_less_digits = allow_less_digits
+        self.use_add_carry = use_add_carry
         self.use_multiplication = use_multiplication
+        self.use_division = use_division
         self.first_char = first_char
-        self.operator_char = '*' if self.use_multiplication else '+'
+        if self.use_division:
+            self.operator_char = '/'
+        elif self.use_multiplication:
+            self.operator_char = '*'
+        else:
+            self.operator_char = '+'
         self.seq_len = self._compute_seq_len()
         self.data = self._generate_data()
         self.mask = mask
 
     def _compute_seq_len(self):
-        if self.use_multiplication:
+        if self.use_multiplication or self.use_division:
             max_result_digits = self.ndigits * 2
         else:
             max_result_digits = self.ndigits + 1
@@ -98,16 +178,31 @@ class AdditionDataset(Dataset):
         # Structure: "1234+5678=3579" (Fixed length)
         # Length = ndigits + 1 + ndigits + 1 + (ndigits) = 3 * ndigits + 2
         while len(rows) < self.size:
-            if self.use_multiplication:
+            if self.use_division:
+                a, b = generate_ab_multiplication(self.ndigits, allow_less_digits=self.allow_less_digits)
+                c = a * b
+                res = a
+                res_str = str(res)
+                if self.first_char:
+                    res_str = res_str[:1]
+                eqn = f"{c}/{b}={res_str}"
+            elif self.use_multiplication:
                 a, b = generate_ab_multiplication(self.ndigits, allow_less_digits=self.allow_less_digits)
                 res = a * b
+                res_str = str(res)
+                if self.first_char:
+                    res_str = res_str[:1]
+                eqn = f"{a}{self.operator_char}{b}={res_str}"
             else:
-                a, b = generate_ab(self.ndigits, allow_plus1=self.allow_plus1, allow_less_digits=self.allow_less_digits)
+                if self.use_add_carry:
+                    a, b = generate_ab_carry(self.ndigits, allow_plus1=self.allow_plus1, allow_less_digits=self.allow_less_digits)
+                else:
+                    a, b = generate_ab(self.ndigits, allow_plus1=self.allow_plus1, allow_less_digits=self.allow_less_digits)
                 res = a + b
-            res_str = str(res)
-            if self.first_char:
-                res_str = res_str[:1]
-            eqn = f"{a}{self.operator_char}{b}={res_str}"
+                res_str = str(res)
+                if self.first_char:
+                    res_str = res_str[:1]
+                eqn = f"{a}{self.operator_char}{b}={res_str}"
             if len(eqn) > self.seq_len:
                 continue
             eqn = eqn.ljust(self.seq_len, ' ')  # Pad with spaces if needed
@@ -192,6 +287,7 @@ class MyTransformerEncoderLayer(nn.Module):
         self.linear1 = nn.Linear(d_model, dim_feedforward)
         self.dropout = nn.Dropout(dropout)
         self.linear2 = nn.Linear(dim_feedforward, d_model)
+        self.linear12 = nn.Linear(d_model, d_model)
 
         self.norm_first = norm_first
         self.norm1 = nn.LayerNorm(d_model)
@@ -213,6 +309,7 @@ class MyTransformerEncoderLayer(nn.Module):
         src = src + self.dropout1(attn_out)
         src = self.norm1(src)
         ff_out = self.linear2(self.dropout(self.activation(self.linear1(src))))
+        #ff_out = self.activation(self.linear12(src))
         src = src + self.dropout2(ff_out)
         src = self.norm2(src)
         return src
@@ -308,23 +405,51 @@ class ToyLLM(nn.Module):
 
 # --- Training & Evaluation ---
 
-def evaluate_model(model, data, seq_len, ndigits, batch_size, mask=False, n_olayers=1):
-    model.eval()
-    correct_eq = 0
-    correct_chars = 0
-    total_chars = 0
-    prompt_len = seq_len - ndigits
-
+def getxy(data, mask, eq_idx, space_idx):
     if mask:
         x_all = data[:, :-1]
         y_all = data[:, 1:]
     else:
-        x_all = data
-        y_all = data
+        # Clone to avoid mutating the underlying dataset tensors
+        x_all = data.clone()
+        y_all = data.clone()
         # Find = in x and put spaces ater it
-        equal_pos = (x_all == model.embedding.num_embeddings - 3).nonzero(as_tuple=True)[1]
+        equal_pos = (x_all == eq_idx).nonzero(as_tuple=True)[1]
         for i in range(x_all.size(0)):
-            x_all[i, equal_pos[i]+1:] = model.embedding.num_embeddings - 1  # space idx
+            x_all[i, equal_pos[i]+1:] = space_idx
+    return x_all, y_all
+
+def model2(model, x, y, n_olayers):
+    #out = model(x)
+    emb = model.prepare_forward(x)
+    running_mask = torch.ones(x.size(0), dtype=torch.bool, device=x.device)
+    out = model.fc_out(emb)
+    for _ in range(0, n_olayers):
+        emb = model.transformer(emb, x=emb)
+        #out = model.fc_out(emb)
+        current_logits = model.fc_out(emb)
+        out[running_mask] = current_logits[running_mask]
+        preds = torch.argmax(current_logits, dim=2)
+        matched = preds == y
+        running_mask = running_mask & (~matched).any(dim=1)
+    generated = torch.argmax(out, dim=-1)
+    return generated
+
+def tostring(tensor, idx_to_char):
+    strs = []
+    for i in range(tensor.size(0)):
+        s = ''.join([idx_to_char[idx.item()] for idx in tensor[i]])
+        strs.append(s)
+    return strs
+
+def evaluate_model(model, data, seq_len, ndigits, batch_size, eq_idx, idx_to_char, space_idx, mask=False, n_olayers=1):
+    model.eval()
+    correct_eq = 0
+    correct_chars = 0
+    total_chars = 0
+
+    x_all, y_all = getxy(data, mask, eq_idx, space_idx)
+
     total = data.size(0)
 
     with torch.no_grad():
@@ -332,38 +457,25 @@ def evaluate_model(model, data, seq_len, ndigits, batch_size, mask=False, n_olay
             end = min(start + batch_size, total)
             x = x_all[start:end]
             y = y_all[start:end]
+            
 
             if mask:
-                # Prompt is everything up to and including '='
-                prompt = x[:, :prompt_len]
-                generated = prompt
-
-                for _ in range(ndigits):
-                    out = model(generated)
-                    next_tok = torch.argmax(out[:, -1, :], dim=-1, keepdim=True)
-                    generated = torch.cat([generated, next_tok], dim=1)
-
-                expected_full = torch.cat([x, y[:, -1:]], dim=1)
+                generated = torch.argmax(model(x), dim=-1)
             else:
-                #out = model(x)
-                emb = model.prepare_forward(x)
-                running_mask = torch.ones(x.size(0), dtype=torch.bool, device=x.device)
-                out = model.fc_out(emb)
-                for _ in range(0, n_olayers):
-                    emb = model.transformer(emb, x=emb)
-                    #out = model.fc_out(emb)
-                    current_logits = model.fc_out(emb)
-                    out[running_mask] = current_logits[running_mask]
-                    preds = torch.argmax(current_logits, dim=2)
-                    matched = preds == y
-                    running_mask = running_mask & (~matched).any(dim=1)
-                generated = torch.argmax(out, dim=-1)
-                expected_full = y
+                generated = model2(model, x, y, n_olayers)
 
-            matches = generated == expected_full
+            # Get = to end only, find = in expected_full
+            eq_pos = (x == eq_idx).nonzero(as_tuple=True)[1]
+            matches = generated == y
+            skip_chars = 0
+            for i in range(generated.size(0)):
+                start_idx = eq_pos[i] + 1
+                matches[i, :start_idx] = True  # Ignore pre-=
+                skip_chars += start_idx
 
-            correct_chars += matches.sum().item()
-            total_chars += expected_full.numel()
+
+            correct_chars += matches.sum().item() - skip_chars
+            total_chars += y.numel() - skip_chars
             correct_eq += matches.all(dim=1).sum().item()
     
     char_acc = correct_chars / total_chars if total_chars > 0 else 0.0
@@ -371,11 +483,14 @@ def evaluate_model(model, data, seq_len, ndigits, batch_size, mask=False, n_olay
     return char_acc, total_acc
 
 def train(args):
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    device = torch.device('cuda' if torch.cuda.is_available() else ('mps' if torch.mps.is_available() else 'cpu'))
     print(f"Using device: {device}")
 
-    # Vocab: 0-9, +, =, space
-    vocab = "0123456789+=* "
+    if args.mul and args.div:
+        raise ValueError("Use only one of --mul or --div.")
+
+    # Vocab: 0-9, +, =, *, /, space
+    vocab = "0123456789+=*/ "
     
     # Dataset: generate once and split into train/test
     total_size = args.train_size + args.test_size
@@ -388,6 +503,8 @@ def train(args):
         allow_less_digits=args.allow_less_digits,
         mask=args.mask,
         use_multiplication=args.mul,
+        use_division=args.div,
+        use_add_carry=args.add_carry,
         first_char=args.first_char,
     )
     # Print some examples
@@ -422,9 +539,13 @@ def train(args):
         for i in range(test_inputs.size(0)):
             test_inputs[i, equal_pos[i]+1:] = full_dataset.char_to_idx[' ']
     
+    num_example_rows = min(3, train_inputs.size(0))
+    example_inputs = train_inputs[:num_example_rows].clone()
+    example_targets = train_targets[:num_example_rows].clone()
+
     print("Some example data:")
-    for i in range(3):
-        x, y = train_inputs[i], train_targets[i]
+    for i in range(num_example_rows):
+        x, y = example_inputs[i], example_targets[i]
         x_str = ''.join([vocab[idx.item()] for idx in x])
         y_str = ''.join([vocab[idx.item()] for idx in y])
         print(f"Input: {x_str} | Target: {y_str}")
@@ -530,6 +651,9 @@ def train(args):
             with torch.no_grad():
                 preds = output.argmax(dim=-1)
                 match_mask = (preds == current_y)
+                #if args.mask:
+                    # For masked model, ignore positions before the first =
+                match_mask = match_mask | ~after_mask(current_y, eq_idx)
                 result_match = match_mask.all(dim=1)
                 step = step + 1
                 halt =  (step >= args.n_olayers) | result_match
@@ -566,11 +690,15 @@ def train(args):
         avg_test_loss = total_test_loss / max(num_test_batches, 1)
 
         # Evaluation: generation-based accuracies (train and test)
-        train_char_acc, train_total_acc = evaluate_model(
-            model, train_data, seq_len, args.ndigits, args.batch_size, mask=args.mask, n_olayers=args.n_olayers
-        )
+        #train_char_acc, train_total_acc = evaluate_model(
+        #    model, train_data, seq_len, args.ndigits, args.batch_size,
+        #     eq_idx=eq_idx, idx_to_char=vocab, space_idx=space_idx, mask=args.mask,
+        #    n_olayers=args.n_olayers, 
+        #)
         test_char_acc, test_total_acc = evaluate_model(
-            model, test_data, seq_len, args.ndigits, args.batch_size, mask=args.mask, n_olayers=args.n_olayers
+            model, test_data, seq_len, args.ndigits, args.batch_size, 
+            eq_idx=eq_idx, idx_to_char=vocab, space_idx=space_idx, mask=args.mask,
+            n_olayers=args.n_olayers
         )
 
         epoch_time = time.time() - epoch_start
@@ -578,15 +706,32 @@ def train(args):
             f"Epoch {epoch+1}/{args.epochs}, "
             f"Train Time: {epoch_time:.2f}s, "
             f"loss: {avg_train_loss:.4f}, "
-            f"char Acc: {train_char_acc*100:.2f}%, "
-            f"exact acc: {train_total_acc*100:.2f}%, "
+            f"exact Match Rate: {avg_exact_match_rate*100:.2f}%, "
+            #f"char Acc: {train_char_acc*100:.2f}%, "
+            #f"exact acc: {train_total_acc*100:.2f}%, "
             f"Test Loss: {avg_test_loss:.4f}, "
             f"char acc: {test_char_acc*100:.2f}%, "
             f"exact acc: {test_total_acc*100:.2f}%, "
             f"Avg Steps: {avg_steps_to_halt:.2f}, "
-            f"During training exact Match Rate: {avg_exact_match_rate*100:.2f}%"
         )
     
+    print("Some example data after training:")
+    model.eval()
+    with torch.no_grad():
+        for i in range(num_example_rows):
+            x = example_inputs[i : i + 1]
+            y = example_targets[i : i + 1]
+            #pred_tokens = torch.argmax(model(x), dim=-1)  # [1, SeqLen]
+            pred_tokens = model2(model, x, y, args.n_olayers)  # [1, SeqLen]
+            pred_str = ''.join([vocab[idx.item()] for idx in pred_tokens[0].cpu()])
+            print("Before predstr fix:", pred_str, ":)")
+            input_str = ''.join([vocab[idx.item()] for idx in x[0].cpu()])
+            target_str = ''.join([vocab[idx.item()] for idx in y[0].cpu()])
+            eq_idx2 = target_str.index('=')
+            pred_str = target_str[:eq_idx2+1] + pred_str[eq_idx2+1:]
+            print(f"Input: {input_str} | Target: {target_str} | Preds: {pred_str}")
+
+
 if __name__ == "__main__":
     args = get_args()
     train(args)
