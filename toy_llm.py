@@ -81,12 +81,30 @@ def generate_ab_carry(ndigits, allow_plus1=True, allow_less_digits=True):
     a = 0
     b = 0
     # Now it's time to introduce carries
-    for i in range(ndigits):
-        min = 1 if (i == 0) else 0
-        aa=randint(min, 9-min)
-        bb=randint(min, 9-aa)
-        a=a*10+aa
-        b=b*10+bb
+    ndigits1 = ndigits
+    ndigits2 = ndigits
+    if allow_less_digits:
+        ndigits1 = random.randint(1, ndigits)
+        ndigits2 = ndigits1 # random.randint(1, ndigits)
+    mul=1
+    mindigits = min(ndigits1, ndigits2)
+    for i in range(mindigits):
+        min0 = 1 if (i == (mindigits-1)) else 0
+        aa=randint(min0, 9-min0)
+        bb=randint(min0, 9-aa)
+        a=a+aa*mul
+        b=b+bb*mul
+        mul=mul*10
+    maxdigits=max(ndigits1, ndigits2)
+    for i in range(ndigits1, maxdigits):
+        min0 = 1 if (i == (maxdigits-1)) else 0
+        a=a + mul*randint(min0, 9)
+        mul=mul*10
+    for i in range(ndigits2, maxdigits):
+        min0 = 1 if (i == (maxdigits-1)) else 0
+        b=b + mul*randint(min0, 9)
+        mul=mul*10
+        
     return a, b
 
 def generate_ab(ndigits, allow_plus1=True, allow_less_digits=True):
@@ -118,7 +136,7 @@ def get_args():
     parser = argparse.ArgumentParser(description="Toy LLM for Addition (masked transformer only)")
     parser.add_argument('--ndigits', type=int, default=4, help='Number of digits for addends (e.g., 4 for 1234+5678)')
     parser.add_argument('--train_size', type=int, default=10000, help='Number of training examples')
-    parser.add_argument('--test_size', type=int, default=500, help='Number of test examples')
+    parser.add_argument('--test-size', type=int, default=500, help='Number of test examples')
     parser.add_argument('--batch_size', type=int, default=512, help='Batch size')
     parser.add_argument('--epochs', type=int, default=16, help='Number of training epochs')
     parser.add_argument('--lr', type=float, default=0.01, help='Learning rate')
@@ -126,7 +144,7 @@ def get_args():
     parser.add_argument('--hidden_dim', type=int, default=512, help='Hidden dimension for transformer feedforward')
     parser.add_argument('--n_layers', type=int, default=3, help='Number of transformer layers')
     parser.add_argument('--n_heads', type=int, default=64, help='Number of attention heads')
-    parser.add_argument('--n_olayers', type=int, default=6, help='Number of output layers')
+    parser.add_argument('--n_olayers', type=int, default=1, help='Number of output layers')
     parser.add_argument('--addx', action='store_true', help='Add x input to each layer GRU')
     parser.add_argument('--allow-less-digits', action='store_true', help='Allow addends to use fewer digits than ndigits')
     parser.add_argument('--allow-plus1', action='store_true', help='Allow sums that overflow ndigits (one extra digit)')
@@ -135,6 +153,8 @@ def get_args():
     parser.add_argument('--first-char', action='store_true', help='Only keep first digit of result after "="')
     parser.add_argument('--div', action='store_true', help='Generate division dataset (c/b=a) based on multiplication factors')
     parser.add_argument('--add-carry', action='store_true', help='Add using sampling with carry')
+    parser.add_argument('--no-gru', action='store_false', help='Don''t use custom GRU transformer')
+
     return parser.parse_args()
 
 # --- Data Generation ---
@@ -194,7 +214,7 @@ class AdditionDataset(Dataset):
                     res_str = res_str[:1]
                 eqn = f"{a}{self.operator_char}{b}={res_str}"
             else:
-                if self.use_add_carry:
+                if self.use_add_carry: #and randint(0, 1):
                     a, b = generate_ab_carry(self.ndigits, allow_plus1=self.allow_plus1, allow_less_digits=self.allow_less_digits)
                 else:
                     a, b = generate_ab(self.ndigits, allow_plus1=self.allow_plus1, allow_less_digits=self.allow_less_digits)
@@ -364,7 +384,7 @@ class MyTransformerEncoder(nn.Module):
 
 
 class ToyLLM(nn.Module):
-    def __init__(self, vocab_size, embed_dim, hidden_dim, n_layers, n_heads, max_len, addx=False, use_mask=False):
+    def __init__(self, vocab_size, embed_dim, hidden_dim, n_layers, n_heads, max_len, addx=False, use_mask=False, use_gru=True):
         super().__init__()
         self.embedding = nn.Embedding(vocab_size, embed_dim)
         self.pos_encoder = PositionalEncoding(embed_dim, max_len)
@@ -374,13 +394,22 @@ class ToyLLM(nn.Module):
             torch.triu(torch.full((max_len, max_len), float('-inf')), diagonal=1),
             persistent=False,
         )
-        encoder_layer = MyTransformerEncoderLayer(
-            d_model=embed_dim,
-            nhead=n_heads,
-            dim_feedforward=hidden_dim,
-            batch_first=True
-        )
-        self.transformer = MyTransformerEncoder(encoder_layer, num_layers=n_layers, addx=addx)
+        if use_gru:
+            encoder_layer = MyTransformerEncoderLayer(
+                d_model=embed_dim,
+                nhead=n_heads,
+                dim_feedforward=hidden_dim,
+                batch_first=True
+            )
+            self.transformer = MyTransformerEncoder(encoder_layer, num_layers=n_layers, addx=addx)
+        else:
+            encoder_layer = nn.TransformerEncoderLayer(
+                d_model=embed_dim,
+                nhead=n_heads,
+                dim_feedforward=hidden_dim,
+                batch_first=True
+            )
+            self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=n_layers)
         self.fc_out = nn.Linear(embed_dim, vocab_size)
 
     def mask(self, sz):
@@ -419,13 +448,17 @@ def getxy(data, mask, eq_idx, space_idx):
             x_all[i, equal_pos[i]+1:] = space_idx
     return x_all, y_all
 
-def model2(model, x, y, n_olayers):
+def model2(model, x, y, n_olayers, use_gru):
     #out = model(x)
     emb = model.prepare_forward(x)
+    emb0 = emb.clone()
     running_mask = torch.ones(x.size(0), dtype=torch.bool, device=x.device)
     out = model.fc_out(emb)
     for _ in range(0, n_olayers):
-        emb = model.transformer(emb, x=emb)
+        if use_gru:
+            emb = model.transformer(emb, x=emb0)
+        else:
+            emb = model.transformer(emb)
         #out = model.fc_out(emb)
         current_logits = model.fc_out(emb)
         out[running_mask] = current_logits[running_mask]
@@ -442,7 +475,7 @@ def tostring(tensor, idx_to_char):
         strs.append(s)
     return strs
 
-def evaluate_model(model, data, seq_len, ndigits, batch_size, eq_idx, idx_to_char, space_idx, mask=False, n_olayers=1):
+def evaluate_model(model, data, seq_len, ndigits, batch_size, eq_idx, idx_to_char, space_idx, use_gru, mask=False, n_olayers=1):
     model.eval()
     correct_eq = 0
     correct_chars = 0
@@ -462,7 +495,7 @@ def evaluate_model(model, data, seq_len, ndigits, batch_size, eq_idx, idx_to_cha
             if mask:
                 generated = torch.argmax(model(x), dim=-1)
             else:
-                generated = model2(model, x, y, n_olayers)
+                generated = model2(model, x, y, n_olayers, use_gru)
 
             # Get = to end only, find = in expected_full
             eq_pos = (x == eq_idx).nonzero(as_tuple=True)[1]
@@ -559,6 +592,7 @@ def train(args):
         max_len=full_dataset.seq_len,  # For Positional Encoding
         addx=args.addx,
         use_mask=args.mask,
+        use_gru=args.no_gru
     ).to(device)
     mask = model.mask(seq_len-1).to(device) if model.use_mask else None
     
@@ -576,7 +610,7 @@ def train(args):
     # Training Loop
     effective_batch_size = min(args.batch_size, train_inputs.size(0))
     # Each epoch runs enough truncated steps so every example sees roughly n_olayers passes.
-    steps_per_epoch = math.ceil(train_inputs.size(0) / effective_batch_size) * args.n_olayers
+    steps_per_epoch = math.ceil(train_inputs.size(0) / effective_batch_size) #* args.n_olayers
     # Persistent per-slot state
     step = torch.zeros(effective_batch_size, device=device, dtype=torch.long)
     current_x = torch.empty(effective_batch_size, train_inputs.size(1), dtype=torch.long, device=device)
@@ -614,8 +648,8 @@ def train(args):
             idx = _draw_indices(reset_mask.sum().item())
             current_x[reset_mask] = train_inputs[idx]
             current_y[reset_mask] = train_targets[idx]
-            current_x_embed[reset_mask] = model.prepare_forward(current_x[reset_mask])
             hidden[reset_mask] = model.prepare_forward(current_x[reset_mask])
+            current_x_embed[reset_mask] = model.prepare_forward(current_x[reset_mask])
             #hidden[reset_mask] = current_x_embed[reset_mask]
 
 
@@ -624,17 +658,19 @@ def train(args):
             if reset_mask.any():
                 idx = _draw_indices(reset_mask.sum().item())
                 current_x[reset_mask] = train_inputs[idx]
-                current_x_embed[reset_mask] = model.prepare_forward(current_x[reset_mask])
                 #hidden[reset_mask] = current_x_embed[reset_mask]
                 current_y[reset_mask] = train_targets[idx]
                 hidden[reset_mask] = model.prepare_forward(current_x[reset_mask])
+                current_x_embed[reset_mask] = hidden[reset_mask]
 
 
             # Single truncated step; gradients do not flow across steps because we detach below.
             for opt in optimizers:
                 opt.zero_grad()
-            
-            hidden = model.transformer(hidden, mask=mask, x=current_x_embed)
+            if args.no_gru:
+                hidden = model.transformer(hidden, mask=mask, x=current_x_embed.detach())
+            else:
+                hidden = model.transformer(hidden, mask=mask)
             output = model.fc_out(hidden)
             
             # Output: [Batch, SeqLen, Vocab]
@@ -663,8 +699,8 @@ def train(args):
                 total_halts += halt.sum().item()
                 results_match_halts += result_match.sum().item()
                 step = torch.where(halt, torch.zeros_like(step), step)
-                hidden = hidden.detach()
-                hidden[halt] = 0.0  # placeholder state until we refill next loop
+            hidden = hidden.detach()
+            hidden[halt] = 0.0  # placeholder state until we refill next loop
         
         avg_train_loss = total_train_loss / max(num_train_batches, 1)
         avg_steps_to_halt = total_steps_to_halt / max(total_halts, 1)
@@ -682,7 +718,10 @@ def train(args):
                 xemb = model.prepare_forward(x)
                 emb = xemb
                 for _ in range(0, args.n_olayers):
-                    emb = model.transformer(emb, mask=mask, x=xemb)
+                    if args.no_gru:
+                        emb = model.transformer(emb, mask=mask, x=xemb)
+                    else:
+                        emb = model.transformer(emb, mask=mask)
                 out = model.fc_out(emb)
                 test_loss = criterion(out.reshape(-1, len(vocab)), y.reshape(-1))
                 total_test_loss += test_loss.item()
@@ -697,7 +736,7 @@ def train(args):
         #)
         test_char_acc, test_total_acc = evaluate_model(
             model, test_data, seq_len, args.ndigits, args.batch_size, 
-            eq_idx=eq_idx, idx_to_char=vocab, space_idx=space_idx, mask=args.mask,
+            eq_idx=eq_idx, idx_to_char=vocab, space_idx=space_idx, use_gru=args.no_gru, mask=args.mask,
             n_olayers=args.n_olayers
         )
 
