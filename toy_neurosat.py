@@ -21,7 +21,7 @@ from sat_utils import cadical_solve, random_3sat
 
 
 class OneLayerNeuroSAT(nn.Module):
-    def __init__(self, d=32):
+    def __init__(self, d=32, use_act=False):
         super().__init__()
         # initial embeddings for all clauses and literals (shared)
         self.clause_init = nn.Parameter(torch.randn(d))
@@ -32,7 +32,8 @@ class OneLayerNeuroSAT(nn.Module):
         self.Wflip = nn.Linear(d, d, bias=True)
         # read-out: scalar score per literal
         self.readout = nn.Linear(d, 1, bias=True)
-        self.halt = nn.Linear(d, 1, bias=True)
+        self.use_act = use_act
+        self.halt = nn.Linear(d, 1, bias=True) if use_act else None
         self.d = d
         # learnable scales for residual updates
         self.scale_lit = nn.Parameter(torch.tensor(0.5, dtype=torch.float32))
@@ -444,7 +445,7 @@ def train(
     use_act=False,
 ):
 
-    model = OneLayerNeuroSAT(d)
+    model = OneLayerNeuroSAT(d, use_act=use_act)
     if torch.backends.mps.is_available():
         device = torch.device("mps")
     elif torch.cuda.is_available():
@@ -454,12 +455,9 @@ def train(
     print(f"Using device: {device}")
 
     if load_path:
-        try:
-            state = torch.load(load_path, map_location=device)
-            model.load_state_dict(state)
-            print(f"Loaded model state_dict from {load_path}")
-        except Exception as exc:  # pylint: disable=broad-except
-            print(f"Warning: failed to load model from {load_path}: {exc}", file=sys.stderr)
+        state = torch.load(load_path, map_location=device)
+        model.load_state_dict(state)
+        print(f"Loaded model state_dict from {load_path}")
 
     model.to(device)
 
