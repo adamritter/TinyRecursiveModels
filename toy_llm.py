@@ -5,6 +5,7 @@
 # This shows that just having more layers + backprop is not enough to learn addition, we need more tricks
 # - Early stopping for full match of solution
 # - Solution should probably 
+# rpython ubuntu@192.222.50.208 toy_llm.py --n_layers 5 --n_olayers 1  --epochs 30 --train_size 100000 --ndigits 10 --embed_dim 64 --hidden_dim 16 --n_heads 16 --batch_size 256
 
 import copy
 import torch
@@ -76,7 +77,7 @@ def generate_ab_carry_older(ndigits, allow_plus1=True, allow_less_digits=True):
             b+=d
     return a, b
 
-def generate_ab_carry(ndigits, allow_plus1=True, allow_less_digits=True):
+def generate_ab_carry(ndigits, max_carries=10, allow_plus1=True, allow_less_digits=True, allow_different_digits=False):
     # No carry version for now
     a = 0
     b = 0
@@ -85,16 +86,36 @@ def generate_ab_carry(ndigits, allow_plus1=True, allow_less_digits=True):
     ndigits2 = ndigits
     if allow_less_digits:
         ndigits1 = random.randint(1, ndigits)
-        ndigits2 = ndigits1 # random.randint(1, ndigits)
+        if allow_different_digits:
+            ndigits2 = random.randint(1, ndigits)
+        else:
+            ndigits2 = ndigits1
     mul=1
     mindigits = min(ndigits1, ndigits2)
+    carried = 0
+    carries_left = random.randint(0, max_carries)
+    skip_carries = random.randint(0, max_carries)
+    #max_carries = 0
+    can_reset=random.randint(0, max_carries//2)
     for i in range(mindigits):
         min0 = 1 if (i == (mindigits-1)) else 0
-        aa=randint(min0, 9-min0)
-        bb=randint(min0, 9-aa)
+        aa=randint(min0, 9-carried-min0)
+        if carries_left > 0 and not skip_carries:
+            carried = 1
+            carries_left -= 1
+            bb=randint(max(min0, 10-aa-carried), 9)
+        else:
+            bb=randint(min0, 9-aa-carried)
+            carried = 0
+        if skip_carries > 0:
+            skip_carries = skip_carries - 1
         a=a+aa*mul
         b=b+bb*mul
         mul=mul*10
+        if carries_left == 0 and can_reset>0:
+            skip_carries = random.randint(1, max(max_carries, 1))
+            carries_left = random.randint(0, max_carries)
+            can_reset -= 1
     maxdigits=max(ndigits1, ndigits2)
     for i in range(ndigits1, maxdigits):
         min0 = 1 if (i == (maxdigits-1)) else 0
@@ -188,7 +209,7 @@ class AdditionDataset(Dataset):
             max_result_digits = self.ndigits * 2
         else:
             max_result_digits = self.ndigits + 1
-        return self.ndigits * 2 + max_result_digits + 2
+        return self.ndigits * 2 + max_result_digits + 2+2
 
 
     def _generate_data(self):
@@ -212,10 +233,29 @@ class AdditionDataset(Dataset):
                 res_str = str(res)
                 if self.first_char:
                     res_str = res_str[:1]
-                eqn = f"{a}{self.operator_char}{b}={res_str}"
+                ab10 = (a* b) % 10
+                eqn = f"{a}{self.operator_char}{b}+{ab10}={res_str}"
+                #eqn = f"{a}*{b}={res%100}"
             else:
                 if self.use_add_carry: #and randint(0, 1):
-                    a, b = generate_ab_carry(self.ndigits, allow_plus1=self.allow_plus1, allow_less_digits=self.allow_less_digits)
+                    #a, b = random.choice([
+                    #    generate_ab_carry(self.ndigits, allow_plus1=self.allow_plus1, allow_less_digits=self.allow_less_digits),
+                    #    generate_ab_carry(self.ndigits, allow_plus1=self.allow_plus1, allow_less_digits=self.allow_less_digits, allow_different_digits=True),
+                    #    generate_ab(self.ndigits, allow_plus1=self.allow_plus1, allow_less_digits=self.allow_less_digits)
+                    #    ])
+                    #a, b = generate_ab_carry_older(self.ndigits, allow_plus1=self.allow_plus1, allow_less_digits=self.allow_less_digits)
+                    if self.allow_less_digits: # Temporary fix while allow_less_digits is not working well in practice
+                        digits = random.randint(1, self.ndigits)
+                        a, b = random.choice([
+                            generate_ab_carry(digits, allow_plus1=self.allow_plus1, allow_less_digits=False),
+                            generate_ab(digits, allow_plus1=self.allow_plus1, allow_less_digits=False)
+                            ])
+                    else:
+                        a, b = random.choice([
+                            generate_ab_carry(self.ndigits, allow_plus1=self.allow_plus1, allow_less_digits=self.allow_less_digits),
+                            generate_ab(self.ndigits, allow_plus1=self.allow_plus1, allow_less_digits=self.allow_less_digits)
+                            ])
+                    #a, b = generate_ab_carry(self.ndigits, allow_plus1=self.allow_plus1, allow_less_digits=self.allow_less_digits)
                 else:
                     a, b = generate_ab(self.ndigits, allow_plus1=self.allow_plus1, allow_less_digits=self.allow_less_digits)
                 res = a + b
@@ -357,27 +397,23 @@ class MyTransformerEncoder(nn.Module):
         super().__init__()
         if num_layers < 1:
             raise ValueError("num_layers must be >= 1")
-        self.layers = nn.ModuleList(copy.deepcopy(encoder_layer) for _ in range(num_layers))
-        self.gru_cells = nn.ModuleList(
-            nn.GRUCell(self.layers[0].d_model, self.layers[0].d_model) for _ in range(len(self.layers))
-        )
+        self.encoder_layer = encoder_layer
+        self.gru_cell = nn.GRUCell(self.encoder_layer.d_model, self.encoder_layer.d_model)
         self.norm = norm
         self.addx = addx
+        self.num_layers = num_layers
 
 
     def forward(self, src, mask=None, src_key_padding_mask=None, x=None):
         output = src
-        for idx, mod in enumerate(self.layers):
-            layer_out = mod(output, src_mask=mask, src_key_padding_mask=src_key_padding_mask)
+        for idx in range(self.num_layers):
+            layer_out = self.encoder_layer(output, src_mask=mask, src_key_padding_mask=src_key_padding_mask)
             # GRU mixes previous layer output (hidden) with current layer output (input).
             b, s, d = layer_out.shape
             grux = layer_out.reshape(-1, d)
             if (x is not None) and self.addx:
                 grux += x.reshape(-1, d).detach()
-            output = self.gru_cells[idx](
-                grux,
-                output.reshape(-1, d),
-            ).view(b, s, d)
+            output = self.gru_cell(grux, output.reshape(-1, d)).view(b, s, d)
         if self.norm is not None:
             output = self.norm(output)
         return output
@@ -417,9 +453,6 @@ class ToyLLM(nn.Module):
 
     def prepare_forward(self, x):
         # x shape: [Batch, SeqLen]
-        # Causal Mask: Upper triangular is -inf
-        seq_len = x.size(1)
-        mask = self.causal_mask[:seq_len, :seq_len]
         emb = self.embedding(x)
         emb = self.pos_encoder(emb)
         return emb
@@ -548,12 +581,27 @@ def train(args):
         [args.train_size, args.test_size],
         generator=torch.Generator().manual_seed(42),
     )
+     
     eq_idx = full_dataset.char_to_idx['=']
     space_idx = full_dataset.char_to_idx[' ']
     train_indices = torch.tensor(train_dataset.indices, device=device, dtype=torch.long)
     test_indices = torch.tensor(test_dataset.indices, device=device, dtype=torch.long)
     train_data = full_dataset.data.index_select(0, train_indices)
     test_data = full_dataset.data.index_select(0, test_indices)
+    if True: # Overwrite test data
+        test_data = AdditionDataset(
+            total_size//10,
+            args.ndigits,
+            vocab,
+            device,
+            allow_plus1=args.allow_plus1,
+            allow_less_digits=False, #args.allow_less_digits,
+            mask=args.mask,
+            use_multiplication=args.mul,
+            use_division=args.div,
+            use_add_carry=False,
+            first_char=args.first_char,
+        ).data
     if args.mask:
         train_inputs = train_data[:, :-1]
         train_targets = train_data[:, 1:]
@@ -572,9 +620,9 @@ def train(args):
         for i in range(test_inputs.size(0)):
             test_inputs[i, equal_pos[i]+1:] = full_dataset.char_to_idx[' ']
     
-    num_example_rows = min(3, train_inputs.size(0))
-    example_inputs = train_inputs[:num_example_rows].clone()
-    example_targets = train_targets[:num_example_rows].clone()
+    num_example_rows = min(6, train_inputs.size(0))
+    example_inputs = test_inputs[:num_example_rows].clone()
+    example_targets = test_targets[:num_example_rows].clone()
 
     print("Some example data:")
     for i in range(num_example_rows):
@@ -761,7 +809,7 @@ def train(args):
             x = example_inputs[i : i + 1]
             y = example_targets[i : i + 1]
             #pred_tokens = torch.argmax(model(x), dim=-1)  # [1, SeqLen]
-            pred_tokens = model2(model, x, y, args.n_olayers)  # [1, SeqLen]
+            pred_tokens = model2(model, x, y, args.n_olayers, use_gru=args.no_gru)  # [1, SeqLen]
             pred_str = ''.join([vocab[idx.item()] for idx in pred_tokens[0].cpu()])
             print("Before predstr fix:", pred_str, ":)")
             input_str = ''.join([vocab[idx.item()] for idx in x[0].cpu()])
