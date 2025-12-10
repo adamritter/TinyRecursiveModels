@@ -360,6 +360,9 @@ class ProblemSet:
         Returns:
             BoolTensor[B]: True if every clause in the problem is satisfied.
         """
+        if use_target:
+            _, _, exact_per_example = compute_literal_metrics(scores, self.target)
+            return exact_per_example
         with torch.no_grad():
             per_problem = self.num_literals()
             total_literals = scores.numel()
