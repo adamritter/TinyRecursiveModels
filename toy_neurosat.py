@@ -361,7 +361,7 @@ class ProblemSet:
             BoolTensor[B]: True if every clause in the problem is satisfied.
         """
         if use_target:
-            _, _, exact_per_example = compute_literal_metrics(scores, self.target)
+            _, _, exact_per_example = compute_literal_metrics(scores, self)
             return exact_per_example
         with torch.no_grad():
             per_problem = self.num_literals()
@@ -476,7 +476,7 @@ def evaluate_on_loader(
                 scores_view = scores.view(B, per_problem)
 
                 # compute per-example exactness for this attempt
-                _, _, exact_per_example = compute_literal_metrics(scores, problems)
+                exact_per_example = problems.check(scores)
 
                 newly_solved = exact_per_example & ~solved
                 if newly_solved.any():
