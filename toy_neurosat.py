@@ -11,6 +11,8 @@ import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
 
+from typing import Optional
+
 import numpy as np
 import torch
 import torch.nn as nn
@@ -241,57 +243,172 @@ def generate_dataset(
     return dataset
 
 
-def build_batch_from_samples(samples):
-    """Collate a batch of pre-built graphs into one batched graph + targets."""
-    all_Ci = []
-    all_Lj = []
-    all_flip = []
-    all_targets = []
-    clause_offset = 0
-    lit_offset = 0
-    per_problem = None
+class ProblemSet:
+    """
+    Container for a batch of same-sized SAT problems in graph form.
 
-    # samples is a list of tuples from SATDataset.__getitem__:
-    # (Ci, Lj, flip, target, num_clauses, num_literals, per_problem)
-    for Ci, Lj, flip, target, num_clauses, num_literals, per_problem_single in samples:
+    Attributes:
+        Ci: (E,) clause indices for each literal occurrence.
+        Lj: (E,) literal indices in [0, 2*num_vars) matching ``Ci``.
+        flip: (B * 2*num_vars,) index of ¬ℓ for each literal ℓ.
+        num_vars: number of variables per problem.
+        num_clauses: number of clauses per problem.
+        target: optional literal targets (can be None).
+    """
 
-        Ci = Ci + clause_offset
-        Lj = Lj + lit_offset
-        flip = flip + lit_offset
+    def __init__(
+        self,
+        Ci: torch.Tensor,
+        Lj: torch.Tensor,
+        flip: torch.Tensor,
+        num_vars: int,
+        num_clauses: int,
+        target: Optional[torch.Tensor] = None,
+    ):
+        self.Ci = Ci
+        self.Lj = Lj
+        self.flip = flip
+        self.num_vars = num_vars
+        self.num_clauses = num_clauses
+        self.target = target
 
-        all_Ci.append(Ci)
-        all_Lj.append(Lj)
-        all_flip.append(flip)
-        all_targets.append(target)
+    def num_literals(self) -> int:
+        return 2 * self.num_vars
 
-        if per_problem is None:
-            per_problem = per_problem_single
+    def batch_size(self) -> int:
+        literals = self.num_literals()
+        if literals == 0:
+            return 0
+        total = self.flip.numel()
+        if total % literals != 0:
+            raise ValueError("flip length is not divisible by literals per problem")
+        return total // literals
 
-        clause_offset += num_clauses
-        lit_offset += num_literals
+    def to(self, device):
+        """Return a new ProblemSet with tensors moved to ``device``."""
+        return ProblemSet(
+            Ci=self.Ci.to(device),
+            Lj=self.Lj.to(device),
+            flip=self.flip.to(device),
+            num_vars=self.num_vars,
+            num_clauses=self.num_clauses,
+            target=None if self.target is None else self.target.to(device),
+        )
 
-    Ci = torch.cat(all_Ci, dim=0)
-    Lj = torch.cat(all_Lj, dim=0)
-    flip = torch.cat(all_flip, dim=0)
-    target = torch.cat(all_targets, dim=0)
+    @classmethod
+    def build_batch(cls, samples):
+        """Collate a batch of pre-built graphs into one ProblemSet."""
+        all_Ci = []
+        all_Lj = []
+        all_flip = []
+        all_targets = []
+        clause_offset = 0
+        lit_offset = 0
+        per_problem = None
+        num_clauses_per_problem = None
 
-    return Ci, Lj, flip, target, clause_offset, lit_offset, per_problem
+        # samples is a list of tuples from SATDataset.__getitem__:
+        # (Ci, Lj, flip, target, num_clauses, num_literals, per_problem)
+        for Ci, Lj, flip, target, num_clauses, num_literals, per_problem_single in samples:
+
+            Ci = Ci + clause_offset
+            Lj = Lj + lit_offset
+            flip = flip + lit_offset
+
+            all_Ci.append(Ci)
+            all_Lj.append(Lj)
+            all_flip.append(flip)
+            all_targets.append(target)
+
+            if per_problem is None:
+                per_problem = per_problem_single
+            if num_clauses_per_problem is None:
+                num_clauses_per_problem = num_clauses
+            elif num_clauses_per_problem != num_clauses:
+                raise ValueError("All problems in a batch must have the same clause count")
+
+            clause_offset += num_clauses
+            lit_offset += num_literals
+
+        Ci = torch.cat(all_Ci, dim=0)
+        Lj = torch.cat(all_Lj, dim=0)
+        flip = torch.cat(all_flip, dim=0)
+        target = torch.cat(all_targets, dim=0)
+
+        if per_problem is None or num_clauses_per_problem is None:
+            raise ValueError("Empty batch encountered when building ProblemSet")
+
+        num_vars = per_problem // 2
+        return cls(
+            Ci=Ci,
+            Lj=Lj,
+            flip=flip,
+            num_vars=num_vars,
+            num_clauses=num_clauses_per_problem,
+            target=target,
+        )
+
+    def check(self, scores: torch.Tensor, use_target=False):
+        """
+        Given logits and the clause–literal graph, check whether the model's argmax
+        assignment satisfies each CNF in the batch.
+
+        Args:
+            scores: (B * per_problem,) logits for literals.
+            self: selfet describing the CNF batch.
+
+        Returns:
+            BoolTensor[B]: True if every clause in the problem is satisfied.
+        """
+        with torch.no_grad():
+            per_problem = self.num_literals()
+            total_literals = scores.numel()
+            if total_literals % per_problem != 0:
+                raise ValueError("scores length is not divisible by per_problem")
+            batch_size = total_literals // per_problem
+
+            total_clauses = self.num_clauses * batch_size
+            if batch_size == 0:
+                return torch.zeros(0, dtype=torch.bool, device=scores.device)
+            clauses_per_problem = total_clauses // batch_size
+
+            # Literal truth: a literal is true if its score >= its negation's score.
+            # Ties mean the variable did not converge, so the whole example is marked unsolved.
+            literal_true = scores >= scores[self.flip]  # (total_literals,)
+            tie_mask = scores == scores[self.flip]      # (total_literals,)
+            lit_true_for_occurrence = literal_true[self.Lj]  # (E,)
+
+            clause_true_counts = torch.zeros(
+                total_clauses, dtype=torch.int64, device=scores.device
+            )
+            clause_true_counts.index_add_(0, self.Ci, lit_true_for_occurrence.to(torch.int64))
+            clause_sat = clause_true_counts > 0  # (total_clauses,)
+
+            clause_all = clause_sat.view(batch_size, clauses_per_problem).all(dim=1)
+            has_tie = tie_mask.view(batch_size, per_problem).any(dim=1)
+            exact_per_example = clause_all & (~has_tie)
+        return exact_per_example
 
 
-def compute_literal_metrics(scores: torch.Tensor, target: torch.Tensor, per_problem: int):
+def compute_literal_metrics(scores: torch.Tensor, problems: ProblemSet):
     """
     Compute literal-wise and exact accuracy from logits and targets.
 
     Args:
         scores: (B * per_problem,) logits for literals.
-        target: (B * per_problem,) target labels in {0,1}.
-        per_problem: number of literals per SAT instance (2 * num_vars).
+        problems: ProblemSet with targets populated.
 
     Returns:
         literal_accuracy (float), exact_accuracy (float), exact_per_example (BoolTensor[B])
     """
     with torch.no_grad():
+        if problems.target is None:
+            raise ValueError("compute_literal_metrics requires targets in ProblemSet")
+
+        per_problem = problems.num_literals()
+        target = problems.target
         batch_size_actual = target.size(0) // per_problem
+
         scores_view = scores.view(batch_size_actual, per_problem)
         target_view = target.view(batch_size_actual, per_problem)
 
@@ -308,6 +425,7 @@ def compute_literal_metrics(scores: torch.Tensor, target: torch.Tensor, per_prob
         literal_accuracy = correct.float().mean().item()
         exact_accuracy = exact_per_example.float().mean().item()
     return literal_accuracy, exact_accuracy, exact_per_example
+
 
 
 def evaluate_on_loader(
@@ -327,20 +445,18 @@ def evaluate_on_loader(
 
     with torch.no_grad():
         for batch in loader:
-            Ci, Lj, flip, target, num_clauses_total, num_literals_total, per_problem = (
-                build_batch_from_samples(batch)
-            )
+            problems = ProblemSet.build_batch(batch).to(device)
 
-            Ci = Ci.to(device)
-            Lj = Lj.to(device)
-            flip = flip.to(device)
-            target = target.to(device)
+            per_problem = problems.num_literals()
+            B = problems.batch_size()
+            num_clauses_total = problems.num_clauses * B
+            num_literals_total = per_problem * B
+            Ci, Lj, flip = problems.Ci, problems.Lj, problems.flip
 
             Hc0 = model.clause_init.unsqueeze(0).expand(num_clauses_total, -1)
             Hl0 = model.literal_init.unsqueeze(0).expand(num_literals_total, -1)
 
             # "Cheating" test-time unrolls: per-example early stopping when exact.
-            B = target.size(0) // per_problem
             solved = torch.zeros(B, dtype=torch.bool, device=device)
             final_scores_view = torch.zeros(B, per_problem, device=device)
 
@@ -357,9 +473,7 @@ def evaluate_on_loader(
                 scores_view = scores.view(B, per_problem)
 
                 # compute per-example exactness for this attempt
-                _, _, exact_per_example = compute_literal_metrics(
-                    scores, target, per_problem
-                )
+                _, _, exact_per_example = compute_literal_metrics(scores, problems)
 
                 newly_solved = exact_per_example & ~solved
                 if newly_solved.any():
@@ -374,9 +488,9 @@ def evaluate_on_loader(
 
             final_scores = final_scores_view.view(-1)
 
-            loss = F.binary_cross_entropy_with_logits(final_scores, target)
+            loss = F.binary_cross_entropy_with_logits(final_scores, problems.target)
             literal_accuracy, exact_accuracy, _ = compute_literal_metrics(
-                final_scores, target, per_problem
+                final_scores, problems
             )
 
             total_loss += loss.item()
@@ -508,10 +622,7 @@ def train(
     Hc = HcInit.clone()
     Hl = HlInit.clone()
     step = torch.zeros(batch_size, device=device, dtype=torch.int32)
-    Ci = None
-    Lj = None
-    flip = None
-    target = None
+    problems_current: Optional[ProblemSet] = None
     phalt_total = torch.zeros(batch_size, dtype=torch.float32, device=device)
     # set starting multiplier depending on flag:
     # - if increase_multiplier_slowly: start at 1 and grow
@@ -529,56 +640,70 @@ def train(
         compute_time_train = 0.0
 
         for batch_idx, batch in enumerate(train_loader, start=1):
-            CiNew, LjNew, flipNew, targetNew, _, _, per_problem = (
-                build_batch_from_samples(batch)
-            )
+            problems_new = ProblemSet.build_batch(batch).to(device)
 
-            CiNew = CiNew.to(device)
-            LjNew = LjNew.to(device)
-            flipNew = flipNew.to(device)
-            targetNew = targetNew.to(device)
-
-            if Ci is None:
-                Ci = CiNew
-                Lj = LjNew
-                flip = flipNew
-                target = targetNew
+            if problems_current is None:
+                problems_current = problems_new
             else:
+                if (
+                    problems_current.num_literals() != problems_new.num_literals()
+                    or problems_current.num_clauses != problems_new.num_clauses
+                ):
+                    raise ValueError("All problems must share size for persistent training")
+
                 reset_mask = (step == 0)  # Shape: [batch_size] (Boolean)
 
                 if reset_mask.any():
                     # 2. Expand masks for FLATTENED inputs
-                    # For Ci (Clauses): Expand mask to [Batch * num_clauses]
-                    reset_mask_clauses = reset_mask.repeat_interleave(num_clauses*3)
-                    
-                    # For Flip (Variables): Expand mask to [Batch * num_vars]
-                    reset_mask_vars = reset_mask.repeat_interleave(num_vars*2)
+                    # For Ci/Lj (clauses): Expand mask to [Batch * num_clauses * 3]
+                    edges_per_problem = problems_current.num_clauses * 3
+                    reset_mask_clauses = reset_mask.repeat_interleave(edges_per_problem)
+
+                    # For Flip/target (variables): Expand mask to [Batch * num_vars * 2]
+                    reset_mask_vars = reset_mask.repeat_interleave(problems_current.num_literals())
 
                     # 3. Apply Updates using the Expanded Masks
-                    Ci[reset_mask_clauses] = CiNew[reset_mask_clauses]
-                    Lj[reset_mask_clauses] = LjNew[reset_mask_clauses]
-                    flip[reset_mask_vars] = flipNew[reset_mask_vars]
-                    target[reset_mask_vars] = targetNew[reset_mask_vars]
+                    problems_current.Ci[reset_mask_clauses] = problems_new.Ci[reset_mask_clauses]
+                    problems_current.Lj[reset_mask_clauses] = problems_new.Lj[reset_mask_clauses]
+                    problems_current.flip[reset_mask_vars] = problems_new.flip[reset_mask_vars]
+                    if problems_current.target is not None and problems_new.target is not None:
+                        problems_current.target[reset_mask_vars] = problems_new.target[reset_mask_vars]
                     phalt_total[reset_mask] = 0.0
+
+            num_vars_local = problems_current.num_vars
 
             compute_start = time.perf_counter()
             # apply a stack of num_layers one-step updates
             for _ in range(num_layers):
-                Hl, Hc = model(Hc, Hl, Ci, Lj, flip)
+                Hl, Hc = model(Hc, Hl, problems_current.Ci, problems_current.Lj, problems_current.flip)
             scores = model.readout(Hl).squeeze(-1)
             literal_accuracy, exact_accuracy, exact_per_example = compute_literal_metrics(
-                scores, target, per_problem
+                scores, problems_current
             )
             if use_act:
-                phalt_current = torch.sigmoid(model.halt(Hl.reshape(batch_size, num_vars * 2, model.d).mean(dim=1).squeeze(-1)).squeeze(-1))
+                phalt_current = torch.sigmoid(
+                    model.halt(
+                        Hl.reshape(batch_size, num_vars_local * 2, model.d)
+                        .mean(dim=1)
+                        .squeeze(-1)
+                    ).squeeze(-1)
+                )
                 phalt_current_detach = phalt_current.detach()
                 overflow_mask = (phalt_total + phalt_current_detach) > 0.99
                 phalt_total = (phalt_total + phalt_current).detach()
-                losses = F.binary_cross_entropy_with_logits(scores, target, reduction='none').reshape(batch_size, num_vars * 2).mean(dim=1)
+                losses = (
+                    F.binary_cross_entropy_with_logits(scores, problems_current.target, reduction='none')
+                    .reshape(batch_size, num_vars_local * 2)
+                    .mean(dim=1)
+                )
                 phalt_current_loss = torch.where(overflow_mask, 1.0 - phalt_total, phalt_current)
                 loss = ((losses * phalt_current_loss + (1.0 - phalt_current_loss) * const_train_loss ).mean()) * current_train_layer_multiplier
             else:
-                losses = F.binary_cross_entropy_with_logits(scores, target, reduction='none').reshape(batch_size, num_vars * 2).mean(dim=1)
+                losses = (
+                    F.binary_cross_entropy_with_logits(scores, problems_current.target, reduction='none')
+                    .reshape(batch_size, num_vars_local * 2)
+                    .mean(dim=1)
+                )
                 #losses = torch.where(exact_per_example, losses * 10.0, losses)
                 #loss = F.binary_cross_entropy_with_logits(scores, target)
                 loss = losses.mean()
@@ -610,8 +735,8 @@ def train(
                 print("Increasing train_layer_multiplier to", current_train_layer_multiplier)
 
             # Create expanded masks matching the flattened sizes
-            halt_clauses = halt.repeat_interleave(num_clauses) # Shape: [B * clauses]
-            halt_literals = halt.repeat_interleave(num_vars * 2) # Shape: [B * vars * 2]
+            halt_clauses = halt.repeat_interleave(problems_current.num_clauses) # Shape: [B * clauses]
+            halt_literals = halt.repeat_interleave(problems_current.num_literals()) # Shape: [B * vars * 2]
 
             # Detach history to stop backprop into past steps
             Hc = Hc.detach()
