@@ -243,6 +243,10 @@ def generate_dataset(
     return dataset
 
 
+def get_exact_accuracy(exact_per_example: torch.Tensor):
+    """Compute exact accuracy from BoolTensor of per-example exactness."""
+    return exact_per_example.float().mean().item()
+
 class ProblemSet:
     """
     Container for a batch of same-sized SAT problems in graph form.
@@ -390,6 +394,8 @@ class ProblemSet:
             clause_all = clause_sat.view(batch_size, clauses_per_problem).all(dim=1)
             has_tie = tie_mask.view(batch_size, per_problem).any(dim=1)
             exact_per_example = clause_all & (~has_tie)
+            # set all to false for now:
+            # exact_per_example = torch.zeros_like(exact_per_example, dtype=torch.bool)
         return exact_per_example
 
 
@@ -426,7 +432,7 @@ def compute_literal_metrics(scores: torch.Tensor, problems: ProblemSet):
         correct = (pred_true == target_true)
         exact_per_example = correct.all(dim=1)  # (B,)
         literal_accuracy = correct.float().mean().item()
-        exact_accuracy = exact_per_example.float().mean().item()
+        exact_accuracy = get_exact_accuracy(exact_per_example)
     return literal_accuracy, exact_accuracy, exact_per_example
 
 
@@ -495,6 +501,7 @@ def evaluate_on_loader(
             literal_accuracy, exact_accuracy, _ = compute_literal_metrics(
                 final_scores, problems
             )
+            exact_accuracy = get_exact_accuracy(problems.check(final_scores))
 
             total_loss += loss.item()
             total_literal_acc += literal_accuracy
@@ -683,6 +690,8 @@ def train(
             literal_accuracy, exact_accuracy, exact_per_example = compute_literal_metrics(
                 scores, problems_current
             )
+            exact_per_example = problems_current.check(scores)
+            exact_accuracy = get_exact_accuracy(exact_per_example)
             if use_act:
                 phalt_current = torch.sigmoid(
                     model.halt(
