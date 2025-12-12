@@ -252,7 +252,7 @@ def cadical_is_unique(clauses: List[List[int]], solution: List[int]) -> bool:
     alt_model = cadical_solve(clauses + [block_clause])
     return alt_model is None
 
-def random_3sat(num_vars=10, num_clauses=40):
+def random_3sat_unique(num_vars=10, num_clauses=40):
     """
     Returns: (clauses, assignment) where:
         - clauses: list[tuple[int]] of length num_clauses, each clause a tuple
@@ -280,6 +280,20 @@ def random_3sat(num_vars=10, num_clauses=40):
         # Convert to the original types: list[tuple[int]] and tuple[int]
         clause_tuples = [tuple(map(int, c)) for c in clauses]
         return clause_tuples, tuple(assignment)
+
+def random_3sat(num_vars=10, num_clauses=40, planted=False):
+    """
+    Returns: (clauses, assignment) where:
+        - clauses: list[tuple[int]] of length num_clauses, each clause a tuple
+          of signed ints (e.g. -3 means ¬x3).
+        - assignment: tuple[int] giving a 0/1 value per variable.
+
+        If ``planted`` is ``True``, generates a random formula with a planted solution else creates a unique solution via rejection sampling.
+    """
+    if planted:
+        return make_rand_3sat_planted(num_vars, num_clauses)
+    else:
+        return random_3sat_unique(num_vars, num_clauses)
 
 
 def cadical_generate_unique(
