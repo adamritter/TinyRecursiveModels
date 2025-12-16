@@ -5,6 +5,7 @@
 # python toy_neurosat.py --iterations 25000 --num-vars 20 --num-clauses 150 --lr 1e-3 --batch-size 64 --epochs 10 --dim 512 --muon --num-layers 16 --test-every-s 10 --test-layer-multiplier 12 --train-layer-multiplier 6 --save model20
 # large model was trained for 7 hours on GH200 by: python toy_neurosat.py --iterations 250000 --num-vars 20 --num-clauses 150 --lr 1e-3 --batch-size 64 --epochs 80 --dim 512 --muon --num-layers 16 --test-every-s 10 --test-layer-multiplier 12 --train-layer-multiplier 6 --save large_model
 # it overfits, test_exact_acc: 0 :)
+# For larger problems need to increase test-every-s to avoid spending all time in eval
 import argparse
 import os
 import sys
@@ -20,6 +21,43 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader
 
 from sat_utils import cadical_solve, random_3sat
+
+
+def _sync_device(device: torch.device):
+    """Synchronize the current device to get accurate timings."""
+    if device.type == "cuda":
+        torch.cuda.synchronize()
+    elif device.type == "mps":
+        try:
+            torch.mps.synchronize()
+        except (AttributeError, RuntimeError):
+            # Older PyTorch versions or CPU-only builds may not support this.
+            pass
+
+
+def _device_memory_gb(device: torch.device):
+    """Return (allocated_gb, reserved_gb) for the active device if available."""
+    allocated = reserved = None
+    if device.type == "cuda":
+        allocated = torch.cuda.memory_allocated() / 1e9
+        reserved = torch.cuda.memory_reserved() / 1e9
+    elif device.type == "mps":
+        try:
+            allocated = torch.mps.current_allocated_memory() / 1e9
+            reserved = torch.mps.driver_allocated_memory() / 1e9
+        except (AttributeError, RuntimeError):
+            pass
+    return allocated, reserved
+
+
+def _rss_gb():
+    """Return resident set size in GB if psutil is available."""
+    try:
+        import psutil
+
+        return psutil.Process(os.getpid()).memory_info().rss / 1e9
+    except Exception:
+        return None
 
 
 class OneLayerNeuroSAT(nn.Module):
@@ -120,7 +158,85 @@ def build_graph(clauses):
     return n, m, Ci, Lj, flip
 
 
-def random_3sat_graph(num_vars=10, num_clauses=40):
+def random_planted_3sat_torch(
+    num_vars: int,
+    num_clauses: int,
+    device: Optional[torch.device] = None,
+    generator: Optional[torch.Generator] = None,
+):
+    """
+    Fast torch-only generator for a planted 3-SAT instance.
+
+    Returns:
+        Ci (LongTensor): shape (num_clauses * 3,), clause index per literal occurrence.
+        Lj (LongTensor): shape (num_clauses * 3,), literal indices in [0, 2*num_vars).
+        flip (LongTensor): shape (2*num_vars,), index of the negation for each literal.
+        target (FloatTensor): shape (2*num_vars,), literal truth values under the planted assignment.
+
+    Notes:
+        - Variables inside clauses are sampled uniformly with replacement; duplicates inside
+          a clause are extremely rare when num_vars is large.
+        - Signs are flipped randomly but each clause is forced to have at least one literal
+          satisfied by the planted assignment.
+        - Optionally pass a torch.Generator (on the same device) to make sampling reproducible.
+    """
+    if device is None:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    # planted assignment in {-1, +1} for each variable
+    assignment = torch.randint(
+        0, 2, (num_vars,), device=device, dtype=torch.int8, generator=generator
+    ) * 2 - 1  # -> {-1, +1}
+
+    # sample 3 variable indices per clause (0-based)
+    var_ids = torch.randint(
+        0, num_vars, (num_clauses, 3), device=device, dtype=torch.int64, generator=generator
+    )
+
+    # base signs from planted assignment
+    base_signs = assignment[var_ids].to(torch.int8)  # (num_clauses, 3)
+
+    # random flips; start with potentially unsatisfied clauses
+    flip_mask = torch.randint(
+        0, 2, (num_clauses, 3), device=device, dtype=torch.int8, generator=generator
+    )
+    literal_signs = torch.where(flip_mask.bool(), -base_signs, base_signs)
+
+    # ensure at least one satisfied literal per clause
+    satisfied = literal_signs == base_signs
+    has_sat = satisfied.any(dim=1)
+    if not has_sat.all():
+        need_fix = (~has_sat).nonzero(as_tuple=False).squeeze(1)
+        if need_fix.numel() > 0:
+            fix_positions = torch.randint(
+                0, 3, (need_fix.numel(),), device=device, dtype=torch.int64, generator=generator
+            )
+            literal_signs[need_fix, fix_positions] = base_signs[need_fix, fix_positions]
+
+    # Build Ci and Lj
+    Ci = torch.repeat_interleave(torch.arange(num_clauses, device=device, dtype=torch.int64), 3)
+    # literal index: 2*var for positive, 2*var+1 for negative
+    is_neg = (literal_signs < 0).to(torch.int64)
+    lit_indices = (var_ids * 2 + is_neg).reshape(-1)
+    Lj = lit_indices
+
+    # flip mapping for 2*num_vars literals
+    flip = torch.empty(2 * num_vars, device=device, dtype=torch.long)
+    pos = torch.arange(num_vars, device=device, dtype=torch.long) * 2
+    neg = pos + 1
+    flip[pos] = neg
+    flip[neg] = pos
+
+    # literal targets: even indices for positive literals, odd for negative
+    pos_true = (assignment == 1).to(torch.float32)
+    target = torch.empty(2 * num_vars, device=device, dtype=torch.float32)
+    target[0::2] = pos_true
+    target[1::2] = 1.0 - pos_true
+
+    return Ci, Lj, flip, target
+
+
+def random_3sat_graph(num_vars=10, num_clauses=40, planted=False):
     """
     Sample a random satisfiable 3-SAT instance and return its graph.
 
@@ -129,7 +245,7 @@ def random_3sat_graph(num_vars=10, num_clauses=40):
         assignment (tuple[int]): one satisfying assignment (0/1 per variable).
         n, m, Ci, Lj, flip: outputs of `build_graph(clauses)`.
     """
-    clauses, assignment = random_3sat(num_vars=num_clauses and num_vars, num_clauses=num_clauses)
+    clauses, assignment = random_3sat(num_vars=num_clauses and num_vars, num_clauses=num_clauses, planted=planted)
     n, m, Ci, Lj, flip = build_graph(clauses)
     return clauses, assignment, n, m, Ci, Lj, flip
 
@@ -201,12 +317,14 @@ def generate_dataset(
     num_clauses=4,
     dataset_size=1024,
     cache_dir="dataset",
+    planted=False,
 ):
     """Pre-generate (and cache) a fixed dataset of satisfiable 3-SAT instances."""
     os.makedirs(cache_dir, exist_ok=True)
+    planted_suffix = "_planted" if planted else ""
     filename = (
         f"toy_neurosat_dataset_size{dataset_size}_"
-        f"vars{num_vars}_clauses{num_clauses}_v3.pt"
+        f"vars{num_vars}_clauses{num_clauses}_v3{planted_suffix}.pt"
     )
     path = os.path.join(cache_dir, filename)
 
@@ -218,7 +336,8 @@ def generate_dataset(
         return data
 
     def _make_one(_):
-        clauses, assignment = random_3sat(num_vars, num_clauses)
+        clauses, assignment_raw = random_3sat(num_vars, num_clauses, planted=planted)
+        assignment = [1 if int(lit) > 0 else 0 for lit in assignment_raw]
         n, m, Ci, Lj, flip = build_graph(clauses)
         target = torch.tensor(
             [assignment[i // 2] if i % 2 == 0 else 1 - assignment[i // 2]
@@ -236,7 +355,8 @@ def generate_dataset(
     create_time = time.perf_counter() - t0
     print(
         f"Created dataset of {dataset_size} problems "
-        f"(vars={num_vars}, clauses={num_clauses}) in {create_time:.3f}s, saved to {path}"
+        f"(vars={num_vars}, clauses={num_clauses}, planted={planted}) "
+        f"in {create_time:.3f}s, saved to {path}"
     )
 
     torch.save(dataset, path)
@@ -567,6 +687,8 @@ def train(
     eval_only=False,
     solve_only=False,
     use_act=False,
+    planted=False,
+    debug_log_interval=0,
 ):
 
     model = OneLayerNeuroSAT(d, use_act=use_act)
@@ -585,7 +707,12 @@ def train(
 
     model.to(device)
 
-    graphs = generate_dataset(num_vars=num_vars, num_clauses=num_clauses, dataset_size=dataset_size)
+    graphs = generate_dataset(
+        num_vars=num_vars,
+        num_clauses=num_clauses,
+        dataset_size=dataset_size,
+        planted=planted,
+    )
     if solve_only:
         _solve_dataset_with_cadical(graphs)
         return model
@@ -604,7 +731,7 @@ def train(
     optimizers = create_optimizers(model, lr, use_muon)
 
     num_samples = len(graphs)
-    test_size = min(500, num_samples // 2) if num_samples > 1 else 0
+    test_size = min(500, num_samples // 10) if num_samples > 1 else 0
     split = num_samples - test_size
     train_graphs = graphs[:split]
     test_graphs = graphs[split:] if test_size > 0 else graphs
@@ -639,6 +766,8 @@ def train(
     # - otherwise: start directly at the requested train_layer_multiplier
     current_train_layer_multiplier = 1 if increase_multiplier_slowly else train_layer_multiplier
 
+    debug_enabled = debug_log_interval > 0
+
     for epoch in range(1, epochs + 1):
         # ---- training ----
         model.train()
@@ -648,9 +777,35 @@ def train(
         total_exact_acc = 0.0
         num_batches = 0
         compute_time_train = 0.0
-
         for batch_idx, batch in enumerate(train_loader, start=1):
+
+            # Timings per batch (all zero when debug is disabled).
+            t_load = t_fwd = t_bwd = t_step = t_reset = 0.0
+
+            if debug_enabled:
+                _sync_device(device)
+                t0 = time.perf_counter()
+
             problems_new = ProblemSet.build_batch(batch).to(device)
+            # Dynamic problem creation:
+            if planted:
+                # Create new problems using random planted 3-SAT generator torch:
+                batch2 = []
+                for _ in range(batch_size):
+                    Ci, Lj, flip, target = random_planted_3sat_torch(
+                        num_vars=num_vars,
+                        num_clauses=num_clauses,
+                        device=device,
+                    )
+                    num_clauses_total = num_clauses
+                    num_literals = num_vars * 2
+                    per_problem = num_literals
+                    batch2.append((Ci, Lj, flip, target, num_clauses_total, num_literals, per_problem))
+                problems_new = ProblemSet.build_batch(batch2).to(device)
+
+            if debug_enabled:
+                _sync_device(device)
+                t_load = time.perf_counter() - t0
 
             if problems_current is None:
                 problems_current = problems_new
@@ -682,11 +837,20 @@ def train(
 
             num_vars_local = problems_current.num_vars
 
+            if debug_enabled:
+                _sync_device(device)
+                t1 = time.perf_counter()
+
             compute_start = time.perf_counter()
             # apply a stack of num_layers one-step updates
             for _ in range(num_layers):
                 Hl, Hc = model(Hc, Hl, problems_current.Ci, problems_current.Lj, problems_current.flip)
             scores = model.readout(Hl).squeeze(-1)
+
+            if debug_enabled:
+                _sync_device(device)
+                t_fwd = time.perf_counter() - t1
+
             literal_accuracy, exact_accuracy, exact_per_example = compute_literal_metrics(
                 scores, problems_current
             )
@@ -722,12 +886,21 @@ def train(
                 if const_train_loss != 0.0:
                     loss = loss + const_train_loss
 
-
+            if debug_enabled:
+                _sync_device(device)
+                t_bwd_start = time.perf_counter()
             for opt in optimizers:
                 opt.zero_grad()
             loss.backward()
+            if debug_enabled:
+                _sync_device(device)
+                t_bwd = time.perf_counter() - t_bwd_start
+                t_step_start = time.perf_counter()
             for opt in optimizers:
                 opt.step()
+            if debug_enabled:
+                _sync_device(device)
+                t_step = time.perf_counter() - t_step_start
 
 
             total_loss += loss.item()
@@ -754,11 +927,35 @@ def train(
             Hc = Hc.detach()
             Hl = Hl.detach()
 
+            if debug_enabled:
+                _sync_device(device)
+                t_reset_start = time.perf_counter()
+
             # Reset only the halted parts to Init state
             Hc[halt_clauses] = HcInit[halt_clauses]
             Hl[halt_literals] = HlInit[halt_literals]
 
             step = torch.where(halt, 0, step)
+
+            if debug_enabled:
+                _sync_device(device)
+                t_reset = time.perf_counter() - t_reset_start
+
+            if debug_enabled and (batch_idx % debug_log_interval == 0):
+                alloc_gb, reserved_gb = _device_memory_gb(device)
+                rss_gb = _rss_gb()
+                msg = (
+                    f"[debug] batch {batch_idx} | "
+                    f"load {t_load:.4f}s fwd {t_fwd:.4f}s "
+                    f"bwd {t_bwd:.4f}s step {t_step:.4f}s reset {t_reset:.4f}s"
+                )
+                if alloc_gb is not None:
+                    msg += f" | mem {alloc_gb:.2f}G"
+                    if reserved_gb is not None:
+                        msg += f" (reserved {reserved_gb:.2f}G)"
+                if rss_gb is not None:
+                    msg += f" | rss {rss_gb:.2f}G"
+                print(msg)
 
             # Optional mid-epoch evaluation based on wall-clock time
             if test_every_s > 0.0:
@@ -831,6 +1028,11 @@ def main(argv):
         help="Number of clauses in each random 3-SAT instance.",
     )
     parser.add_argument(
+        "--planted",
+        action="store_true",
+        help="If set, generate planted-solution 3-SAT instances instead of unique ones.",
+    )
+    parser.add_argument(
         "--dim",
         type=int,
         default=32,
@@ -897,6 +1099,12 @@ def main(argv):
         help="If >0, run evaluation every this many seconds inside each epoch.",
     )
     parser.add_argument(
+        "--debug-log-interval",
+        type=int,
+        default=0,
+        help="If >0, print per-batch timing/memory stats every this many batches.",
+    )
+    parser.add_argument(
         "--save",
         type=str,
         default=None,
@@ -944,6 +1152,8 @@ def main(argv):
         eval_only=args.eval_only,
         solve_only=args.solve_only,
         use_act=args.act,
+        planted=args.planted,
+        debug_log_interval=args.debug_log_interval,
     )
     if args.save:
         save_dir = os.path.dirname(args.save)
