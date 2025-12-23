@@ -17,6 +17,8 @@ def parse_cnf(content: str) -> Tuple[int, List[List[int]]]:
 
     for raw_line in content.splitlines():
         line = raw_line.strip()
+        if line.startswith("%"):
+            break  # End-of-CNF marker; ignore anything that follows.
         if not line or line.startswith("c"):
             continue
 
