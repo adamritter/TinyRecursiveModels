@@ -10,6 +10,7 @@ import argparse
 import os
 import sys
 import time
+from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 
 from typing import Optional
@@ -19,8 +20,9 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
+from safetensors.torch import load_file, save_file
 
-from sat_utils import cadical_solve, random_3sat
+from sat_utils import cadical_solve, evaluate_solution, parse_cnf, random_3sat
 
 
 def _sync_device(device: torch.device):
@@ -156,6 +158,45 @@ def build_graph(clauses):
             for v in vars_ for i in range(2)]
     flip = torch.tensor(flip, dtype=torch.long)
     return n, m, Ci, Lj, flip
+
+
+def build_graph_with_num_vars(clauses, num_vars: int):
+    """
+    Build a bipartite clause–literal graph for a CNF instance with a fixed var count.
+    """
+    if num_vars < 0:
+        raise ValueError("num_vars must be non-negative.")
+
+    m = len(clauses)
+    if num_vars == 0:
+        empty = torch.tensor([], dtype=torch.long)
+        return 0, m, empty, empty, empty
+
+    lit_index = {
+        (v, s): 2 * (v - 1) + (0 if s == 1 else 1)
+        for v in range(1, num_vars + 1)
+        for s in (1, -1)
+    }
+    Ci, Lj = [], []
+    for ci, clause in enumerate(clauses):
+        for lit in clause:
+            val = int(lit)
+            v = abs(val)
+            s = 1 if val > 0 else -1
+            if v < 1 or v > num_vars:
+                raise ValueError(f"Literal {lit} outside 1..{num_vars}.")
+            Ci.append(ci)
+            Lj.append(lit_index[(v, s)])
+    Ci = torch.tensor(Ci, dtype=torch.long)
+    Lj = torch.tensor(Lj, dtype=torch.long)
+
+    flip = torch.empty(2 * num_vars, dtype=torch.long)
+    for v in range(1, num_vars + 1):
+        pos = lit_index[(v, 1)]
+        neg = lit_index[(v, -1)]
+        flip[pos] = neg
+        flip[neg] = pos
+    return num_vars, m, Ci, Lj, flip
 
 
 def random_planted_3sat_torch(
@@ -367,6 +408,89 @@ def get_exact_accuracy(exact_per_example: torch.Tensor):
     """Compute exact accuracy from BoolTensor of per-example exactness."""
     return exact_per_example.float().mean().item()
 
+
+class Problem:
+    """
+    Container for a single SAT problem in graph form (no batching).
+    """
+
+    def __init__(
+        self,
+        Ci: torch.Tensor,
+        Lj: torch.Tensor,
+        flip: torch.Tensor,
+        num_vars: int,
+        num_clauses: int,
+        target: Optional[torch.Tensor] = None,
+    ):
+        self.Ci = Ci
+        self.Lj = Lj
+        self.flip = flip
+        self.num_vars = num_vars
+        self.num_clauses = num_clauses
+        self.target = target
+
+    @classmethod
+    def from_cnf(cls, filename: str):
+        """
+        Build a Problem from a DIMACS CNF file.
+        """
+        content = Path(filename).read_text(encoding="utf-8")
+        num_vars, clauses = parse_cnf(content)
+        num_vars, num_clauses, Ci, Lj, flip = build_graph_with_num_vars(clauses, num_vars)
+        return cls(Ci=Ci, Lj=Lj, flip=flip, num_vars=num_vars, num_clauses=num_clauses, target=None)
+
+    def num_literals(self) -> int:
+        return 2 * self.num_vars
+
+    def to(self, device):
+        return Problem(
+            Ci=self.Ci.to(device),
+            Lj=self.Lj.to(device),
+            flip=self.flip.to(device),
+            num_vars=self.num_vars,
+            num_clauses=self.num_clauses,
+            target=None if self.target is None else self.target.to(device),
+        )
+
+    def check(self, scores: torch.Tensor, use_target: bool = False):
+        """
+        Return BoolTensor[1] indicating if the single problem is satisfied.
+        """
+        per_problem = self.num_literals()
+        if scores.numel() != per_problem:
+            raise ValueError("scores length must match literals in the problem")
+
+        if use_target:
+            if self.target is None:
+                raise ValueError("Target is required when use_target=True")
+            scores_view = scores.view(1, per_problem)
+            target_view = self.target.view(1, per_problem)
+
+            num_vars = per_problem // 2
+            scores_pair = scores_view.view(1, num_vars, 2)
+            target_pair = target_view.view(1, num_vars, 2)
+
+            pred_true = scores_pair[..., 0] >= scores_pair[..., 1]
+            target_true = target_pair[..., 0] > 0.5
+            exact_per_example = (pred_true == target_true).all(dim=1)
+            return exact_per_example
+
+        literal_true = scores >= scores[self.flip]
+        tie_mask = scores == scores[self.flip]
+        lit_true_for_occurrence = literal_true[self.Lj]
+
+        clause_true_counts = torch.zeros(
+            self.num_clauses, dtype=torch.int64, device=scores.device
+        )
+        clause_true_counts.index_add_(0, self.Ci, lit_true_for_occurrence.to(torch.int64))
+        clause_sat = clause_true_counts > 0
+
+        has_tie = tie_mask.view(1, per_problem).any(dim=1)
+        exact_per_example = clause_sat.view(1, self.num_clauses).all(dim=1) & (~has_tie)
+        return exact_per_example
+
+
 class ProblemSet:
     """
     Container for a batch of same-sized SAT problems in graph form.
@@ -556,6 +680,95 @@ def compute_literal_metrics(scores: torch.Tensor, problems: ProblemSet):
     return literal_accuracy, exact_accuracy, exact_per_example
 
 
+def _default_solution_path(cnf_path: str) -> str:
+    path = Path(cnf_path)
+    if path.suffix.lower() == ".cnf":
+        return str(path.with_suffix(".sol"))
+    return f"{path}.sol"
+
+
+def _write_solution_file(path: str, assignment, is_sat: bool) -> None:
+    status = "SATISFIABLE" if is_sat else "UNKNOWN"
+    lines = [f"s {status}"]
+    if assignment:
+        literals = " ".join(str(int(lit)) for lit in assignment)
+        lines.append(f"v {literals} 0")
+    else:
+        lines.append("v 0")
+    Path(path).write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def _scores_to_assignment(scores: torch.Tensor, num_vars: int):
+    assignment = []
+    for var in range(1, num_vars + 1):
+        pos_idx = 2 * (var - 1)
+        neg_idx = pos_idx + 1
+        if scores[pos_idx] >= scores[neg_idx]:
+            assignment.append(var)
+        else:
+            assignment.append(-var)
+    return assignment
+
+
+def solve_cnf_file(
+    model,
+    device,
+    cnf_path: str,
+    output_path: str,
+    num_layers: int,
+    test_layer_multiplier: int,
+) -> bool:
+    problem = Problem.from_cnf(cnf_path).to(device)
+
+    per_problem = problem.num_literals()
+    if per_problem == 0:
+        _write_solution_file(output_path, [], True)
+        return True
+
+    B = 1
+    num_clauses_total = problem.num_clauses * B
+    num_literals_total = per_problem * B
+
+    Hc0 = model.clause_init.unsqueeze(0).expand(num_clauses_total, -1)
+    Hl0 = model.literal_init.unsqueeze(0).expand(num_literals_total, -1)
+
+    solved = torch.zeros(B, dtype=torch.bool, device=device)
+    final_scores_view = torch.zeros(B, per_problem, device=device)
+
+    Hl = Hl0
+    Hc = Hc0
+    scores_view = None
+
+    model.eval()
+    with torch.no_grad():
+        attempts = max(1, int(test_layer_multiplier))
+        for _attempt in range(attempts):
+            for _ in range(num_layers):
+                Hl, Hc = model(Hc, Hl, problem.Ci, problem.Lj, problem.flip)
+            scores = model.readout(Hl).squeeze(-1)
+            scores_view = scores.view(B, per_problem)
+
+            exact_per_example = problem.check(scores)
+            newly_solved = exact_per_example & ~solved
+            if newly_solved.any():
+                final_scores_view[newly_solved] = scores_view[newly_solved]
+                solved = solved | newly_solved
+            if solved.all():
+                break
+
+    if scores_view is None:
+        raise RuntimeError("No scores produced during evaluation.")
+
+    if not solved.all():
+        final_scores_view[~solved] = scores_view[~solved]
+
+    final_scores = final_scores_view.view(-1).detach().cpu()
+    assignment = _scores_to_assignment(final_scores, problem.num_vars)
+    is_sat = evaluate_solution(parse_cnf(Path(cnf_path).read_text(encoding="utf-8"))[1], assignment)
+    if is_sat:
+        _write_solution_file(output_path, assignment, is_sat)
+    return is_sat
+
 
 def evaluate_on_loader(
     model, device, loader, num_layers, test_layer_multiplier, print_prefix=None,
@@ -701,7 +914,7 @@ def train(
     print(f"Using device: {device}")
 
     if load_path:
-        state = torch.load(load_path, map_location=device)
+        state = load_file(load_path)
         model.load_state_dict(state)
         print(f"Loaded model state_dict from {load_path}")
 
@@ -1117,6 +1330,18 @@ def main(argv):
         help="If set, load a model state_dict from this path before training.",
     )
     parser.add_argument(
+        "--eval",
+        type=str,
+        default=None,
+        help="If set, solve the provided DIMACS CNF file and write a solution file.",
+    )
+    parser.add_argument(
+        "--eval-output",
+        type=str,
+        default=None,
+        help="Optional output path for the DIMACS solution file (default: <cnf>.sol).",
+    )
+    parser.add_argument(
         "--eval-only",
         action="store_true",
         help="If set, skip training and only evaluate on the full generated dataset.",
@@ -1132,6 +1357,42 @@ def main(argv):
         help="If set, use adaptive computation time (ACT) during training.",
     )
     args = parser.parse_args(argv)
+
+    if args.eval:
+        if args.load is None:
+            raise ValueError("--eval requires --load to provide model weights.")
+        if torch.backends.mps.is_available():
+            device = torch.device("mps")
+        elif torch.cuda.is_available():
+            device = torch.device("cuda")
+        else:
+            device = torch.device("cpu")
+        print(f"Using device: {device}")
+
+        model = OneLayerNeuroSAT(args.dim, use_act=args.act)
+        state = load_file(args.load)
+        model.load_state_dict(state)
+        model.to(device)
+        print(f"Loaded model state_dict from {args.load}")
+
+        output_path = args.eval_output or _default_solution_path(args.eval)
+        output_dir = os.path.dirname(output_path)
+        if output_dir:
+            os.makedirs(output_dir, exist_ok=True)
+
+        is_sat = solve_cnf_file(
+            model=model,
+            device=device,
+            cnf_path=args.eval,
+            output_path=output_path,
+            num_layers=args.num_layers,
+            test_layer_multiplier=args.test_layer_multiplier,
+        )
+        if is_sat:
+            print(f"Wrote SAT solution to {output_path}")
+        else:
+            print("UNKNOWN")
+        return 0
 
     model = train(
         epochs=args.epochs,
@@ -1159,7 +1420,7 @@ def main(argv):
         save_dir = os.path.dirname(args.save)
         if save_dir:
             os.makedirs(save_dir, exist_ok=True)
-        torch.save(model.state_dict(), args.save)
+        save_file(model.state_dict(), args.save)
         print(f"Saved model state_dict to {args.save}")
     return 0
 
