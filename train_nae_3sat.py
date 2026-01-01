@@ -390,7 +390,7 @@ if __name__ == "__main__":
     write_cnf(nae100_problems[0], 'test_nae3sat.cnf')
     print_assignment(nae100_assignments[0])
     train_clauses(n, nae100_problems[0:256], steps=1000, lr=1, generator=generator)
-    train_gnn(n, nae100_problems, steps=160, lr=0.001, hidden_dim=16, num_rounds=15, generator=generator, batch_size=1024, test_size=256, outer_rounds=2)
+    train_gnn(n, nae100_problems, steps=80, lr=0.001, hidden_dim=16, num_rounds=15, generator=generator, batch_size=1024, test_size=256, outer_rounds=4)
 
     nae1000_problem, nae1000_assignment = nae_3sat(1000, device=device, generator=generator)
     write_cnf(nae1000_problem, 'test_nae3sat_big.cnf')
