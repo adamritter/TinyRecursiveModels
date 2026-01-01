@@ -382,7 +382,7 @@ def train_gnn(n, problems, steps=10, lr=1e-3, hidden_dim=16, num_rounds=10, gene
         print(f"GNN Test: clause_accuracy={clause_accuracy:.2f}%, exact_accuracy={exact_accuracy:.2f}% in {time.time()-t:.2f} seconds")
 
 if __name__ == "__main__":
-    n = 20
+    n = 100
     device='mps' if torch.backends.mps.is_available() else 'cuda' if torch.cuda.is_available() else 'cpu'
     print("Using device:", device)
     generator=torch.Generator(device=device).manual_seed(0)
