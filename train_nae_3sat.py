@@ -299,7 +299,9 @@ def print_planted_assignment(n, assignment_batch_item):
         print(-i - 1 if val else i + 1, end=' ')
     print()
 
-def train_gnn(n, problems, steps=10, lr=1e-3, hidden_dim=16, num_rounds=10, generator=None, batch_size=None, test_size=None, outer_rounds=1):
+def train_gnn(problems, steps=10, lr=1e-3, hidden_dim=16, num_rounds=10, generator=None, batch_size=None, test_size=None, outer_rounds=1, model=None, n=None):
+    if n is None:
+        n = problems.abs().max().item()
     if problems.ndim == 2:
         problems = problems.unsqueeze(0)
     if test_size is not None:
@@ -308,7 +310,8 @@ def train_gnn(n, problems, steps=10, lr=1e-3, hidden_dim=16, num_rounds=10, gene
     B, num_clauses, _ = problems.shape
     batch_size = B if batch_size is None else min(batch_size, B)
 
-    model = GNN(hidden_dim, num_rounds).to(problems.device)
+    if model is None:
+        model = GNN(hidden_dim, num_rounds).to(problems.device)
     
     # Separate parameters for Muon optimizer (2D tensors) and Adam (other tensors)
     params_2d = []
@@ -356,6 +359,7 @@ def train_gnn(n, problems, steps=10, lr=1e-3, hidden_dim=16, num_rounds=10, gene
                 # P(all literals in clause_i are false) = product(sigmoid(-logit_j))
                 clause_logprobs = F.logsigmoid(-prod_logits(-lits_logits, dim=-1))
                 total_loss = torch.logsumexp(-clause_logprobs, dim=0).mean()
+                #total_loss = -clause_logprobs.mean()
                 
                 total_loss.backward()
                 opt.step()
@@ -365,12 +369,13 @@ def train_gnn(n, problems, steps=10, lr=1e-3, hidden_dim=16, num_rounds=10, gene
 
         last_loss = total_loss_accum / max(total_seen, 1)
 
-    with torch.no_grad():
-        state = None
-        for _ in range(outer_rounds):
-            var_logits, state = model(problems, state)
-        clause_accuracy, exact_accuracy = compute_clause_and_exact_accuracy(problems, var_logits)
-    print(f"GNN Step {step+1}: loss={last_loss:.6f}, clause_accuracy={clause_accuracy:.2f}%, exact_accuracy={exact_accuracy:.2f}% in {time.time()-t_start:.2f} seconds")
+    if problems.size(0) > 0:
+        with torch.no_grad():
+            state = None
+            for _ in range(outer_rounds):
+                var_logits, state = model(problems, state)
+            clause_accuracy, exact_accuracy = compute_clause_and_exact_accuracy(problems, var_logits)
+        print(f"GNN Step {step+1}: loss={last_loss:.6f}, clause_accuracy={clause_accuracy:.2f}%, exact_accuracy={exact_accuracy:.2f}% in {time.time()-t_start:.2f} seconds")
 
     if test_size is not None:
         with torch.no_grad():
@@ -380,6 +385,8 @@ def train_gnn(n, problems, steps=10, lr=1e-3, hidden_dim=16, num_rounds=10, gene
                 var_logits, state = model(test, state)
             clause_accuracy, exact_accuracy = compute_clause_and_exact_accuracy(test, var_logits)
         print(f"GNN Test: clause_accuracy={clause_accuracy:.2f}%, exact_accuracy={exact_accuracy:.2f}% in {time.time()-t:.2f} seconds")
+    
+    return model, clause_accuracy, exact_accuracy
 
 if __name__ == "__main__":
     n = 100
@@ -390,7 +397,11 @@ if __name__ == "__main__":
     write_cnf(nae100_problems[0], 'test_nae3sat.cnf')
     print_assignment(nae100_assignments[0])
     train_clauses(n, nae100_problems[0:256], steps=1000, lr=1, generator=generator)
-    train_gnn(n, nae100_problems, steps=80, lr=0.001, hidden_dim=16, num_rounds=15, generator=generator, batch_size=1024, test_size=256, outer_rounds=4)
 
+    while True:
+        model, _, _ = train_gnn(nae_3sat(100, device=device, batch_size=2*4096+256, generator=generator)[0],
+                        steps=10, lr=0.001, hidden_dim=16, num_rounds=15, generator=generator,
+                            batch_size=256, test_size=256, outer_rounds=4)
+                    
     nae1000_problem, nae1000_assignment = nae_3sat(1000, device=device, generator=generator)
     write_cnf(nae1000_problem, 'test_nae3sat_big.cnf')
