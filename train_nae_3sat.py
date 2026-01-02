@@ -299,6 +299,24 @@ def print_planted_assignment(n, assignment_batch_item):
         print(-i - 1 if val else i + 1, end=' ')
     print()
 
+def compute_batch_loss(model, batch, state):
+    """
+    Runs the model on a batch and returns (loss, detached_state) for reuse.
+    """
+    var_logits, state = model(batch, state)
+    state = state.detach()
+
+    clauses_abs = batch.abs().long() - 1
+    clauses_sign = batch.sign()
+
+    bB, num_clauses, _ = batch.shape
+    gathered_var_logits = var_logits.gather(1, clauses_abs.view(bB, -1)).view(bB, num_clauses, 3)
+    lits_logits = clauses_sign * gathered_var_logits
+
+    clause_logprobs = F.logsigmoid(-prod_logits(-lits_logits, dim=-1))
+    total_loss = torch.logsumexp(-clause_logprobs, dim=0).mean()
+    return total_loss, state
+
 def train_gnn(problems, steps=10, lr=1e-3, hidden_dim=16, num_rounds=10, generator=None, batch_size=None, test_size=None, outer_rounds=1, model=None, n=None):
     if n is None:
         n = problems.abs().max().item()
@@ -326,6 +344,7 @@ def train_gnn(problems, steps=10, lr=1e-3, hidden_dim=16, num_rounds=10, generat
     t_start = time.time()
 
     last_loss = 0.0
+
     for step in range(steps):
         perm = torch.randperm(B, device=problems.device, generator=generator)
         total_loss_accum = 0.0
@@ -339,28 +358,7 @@ def train_gnn(problems, steps=10, lr=1e-3, hidden_dim=16, num_rounds=10, generat
             state = None
             for _ in range(outer_rounds):
                 opt.zero_grad()
-                var_logits, state = model(batch, state) # (bB, n)
-                state = state.detach()
-
-                # Same loss calculation as in train_clauses
-                clauses_abs = batch.abs().long() - 1 # 0-indexed variable IDs
-                clauses_sign = batch.sign()
-
-                # Gather logits for each literal in each clause
-                # For a literal `v`, if it's positive, we use var_logits[:, v-1]
-                # If it's negative, we use -var_logits[:, v-1]
-                # This is equivalent to: sign * var_logits.gather(1, abs(literal)-1)
-                gathered_var_logits = var_logits.gather(1, clauses_abs.view(bB, -1)).view(bB, num_clauses, 3)
-                lits_logits = clauses_sign * gathered_var_logits
-
-                # Calculate clause satisfaction probabilities
-                # P(clause_i is true) = 1 - P(all literals in clause_i are false)
-                # P(literal_j is false) = sigmoid(-logit_j)
-                # P(all literals in clause_i are false) = product(sigmoid(-logit_j))
-                clause_logprobs = F.logsigmoid(-prod_logits(-lits_logits, dim=-1))
-                total_loss = torch.logsumexp(-clause_logprobs, dim=0).mean()
-                #total_loss = -clause_logprobs.mean()
-                
+                total_loss, state = compute_batch_loss(model, batch, state)
                 total_loss.backward()
                 opt.step()
 
