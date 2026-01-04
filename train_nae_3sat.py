@@ -192,7 +192,7 @@ def train_clauses(n, problems, steps=10, lr=100.0, generator=None):
         lits_logits = sign * gathered
         clause_logprobs = F.logsigmoid(-prod_logits(-lits_logits, dim=-1))
         #total_loss = -clause_logprobs.sum()
-        total_loss = torch.logsumexp(-clause_logprobs, dim=0).mean() # alternative: log-sum-exp of clause losses
+        total_loss = torch.logsumexp(-clause_logprobs, dim=[0, 1])
         total_loss.backward()
         opt.step()
 
@@ -305,12 +305,14 @@ class GNN(torch.nn.Module):
         flip_idx_base = torch.arange(num_literals, device=problems.device)
         flip_idx_base = flip_idx_base + (1 - 2 * (flip_idx_base % 2))
         flip_idx = (flip_idx_base.unsqueeze(0) + batch_literal_offset.unsqueeze(-1)).view(-1)
+        deg_lit = torch.bincount(Lj, minlength=state.literals.size(0)).float().clamp_min(1).unsqueeze(-1)
 
         for _ in range(self.num_rounds):
             # Clause to Literal message passing
             msg_c2l = self.W_cl(state.clauses)
             agg_c2l = torch.zeros_like(state.literals)
             agg_c2l.index_add_(0, Lj, msg_c2l[Ci])
+            agg_c2l = agg_c2l / deg_lit
 
             # Negated literal message
             flip_in = state.literals[flip_idx]
@@ -327,17 +329,19 @@ class GNN(torch.nn.Module):
 
             # Update clauses
             new_clauses = self.gru_clause(agg_l2c, state.clauses)
+
+            # It was great once, but destabilizes training:
+            #new_literals = F.normalize(new_literals, dim=-1)
+            #new_clauses  = F.normalize(new_clauses,  dim=-1)
+
             state = GNNState(literals=new_literals, clauses=new_clauses)
 
         # Readout: get a score for each literal
         # Reshape Hl to (B, num_literals, hidden_dim)
         Hl_reshaped = state.literals.view(B, num_literals, self.hidden_dim)
         
-        # The readout head gives a single score for each literal
-        # We need to extract the scores for positive literals (even indices)
-        # These scores will represent the logits for P(var=True)
         literal_scores = self.readout(Hl_reshaped).squeeze(-1) # (B, num_literals)
-        var_logits = literal_scores[:, 0::2] # (B, n) - take scores for x1, x2, ..., xn
+        var_logits = literal_scores[:, 0::2] - literal_scores[:, 1::2]# (B, n) - take scores for x1, x2, ..., xn
 
         return var_logits, state
 
