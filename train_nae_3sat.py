@@ -157,6 +157,25 @@ def compute_clause_and_exact_accuracy(problems: torch.Tensor, var_logits: torch.
     exact_accuracy = 100.0 * clause_satisfied.all(dim=-1).sum().item() / B
     return clause_accuracy, exact_accuracy
 
+
+def is_solved(problems: torch.Tensor, var_logits: torch.Tensor):
+    """
+    Compute is solved mask for a batch of problems given variable logits.
+    """
+    if problems.ndim == 2:
+        problems = problems.unsqueeze(0)
+    if var_logits.ndim == 1:
+        var_logits = var_logits.unsqueeze(0)
+
+    B, num_clauses, _ = problems.shape
+    clauses_abs = problems.abs().long() - 1
+    clauses_sign = problems.sign()
+
+    gathered_var_logits = var_logits.gather(1, clauses_abs.view(B, -1)).view(B, num_clauses, 3)
+    lits_logits = clauses_sign * gathered_var_logits
+    clause_satisfied = (lits_logits > 0).any(dim=-1)
+    return clause_satisfied.all(dim=-1)
+
 def train_clauses(n, problems, steps=10, lr=100.0, generator=None):
     if problems.ndim == 2:
         problems = problems.unsqueeze(0)
@@ -188,6 +207,35 @@ class GNNState:
 
     def detach(self) -> "GNNState":
         return GNNState(literals=self.literals.detach(), clauses=self.clauses.detach())
+    
+    def where(mask, first, second) -> "GNNState":
+        """
+        Replace per-problem slices from `first` with freshly initialised slices from `second`
+        wherever `mask` is True. Mask is expected to be shape (batch_size,).
+        """
+        if mask.ndim == 1:  # typical case: mask per problem
+            B = mask.numel()
+            hidden_dim = first.literals.size(-1)
+
+            # Derive how many literals/clauses belong to each problem from the flattened state
+            num_literals = first.literals.size(0) // B
+            num_clauses = first.clauses.size(0) // B
+
+            lit_mask = mask.view(B, 1, 1)
+            clause_mask = mask.view(B, 1, 1)
+
+            first_lit = first.literals.view(B, num_literals, hidden_dim)
+            second_lit = second.literals.view(B, num_literals, hidden_dim)
+            first_clause = first.clauses.view(B, num_clauses, hidden_dim)
+            second_clause = second.clauses.view(B, num_clauses, hidden_dim)
+
+            literals = torch.where(lit_mask, second_lit, first_lit).reshape(-1, hidden_dim)
+            clauses = torch.where(clause_mask, second_clause, first_clause).reshape(-1, hidden_dim)
+        else:
+            literals = torch.where(mask, second.literals, first.literals)
+            clauses = torch.where(mask, second.clauses, first.clauses)
+
+        return GNNState(literals=literals, clauses=clauses)
 
 class GNN(torch.nn.Module):
     def __init__(self, hidden_dim, num_rounds):
@@ -212,9 +260,10 @@ class GNN(torch.nn.Module):
         # Readout head for variable logits
         self.readout = torch.nn.Linear(hidden_dim, 1)
 
-    def init_state(self, problems):
+    def init_state(self, problems, n=None):
         B, num_clauses, _ = problems.shape
-        n = problems.abs().max().item()
+        if n is None:
+            n = problems.abs().max().item()
         num_literals = 2 * n
         literal_signs = torch.arange(num_literals, device=problems.device) % 2
         literals = self.literal_init_emb[literal_signs].unsqueeze(0).expand(B, num_literals, -1).reshape(B * num_literals, self.hidden_dim).clone()
@@ -315,9 +364,10 @@ def compute_batch_loss(model, batch, state):
 
     clause_logprobs = F.logsigmoid(-prod_logits(-lits_logits, dim=-1))
     total_loss = torch.logsumexp(-clause_logprobs, dim=0).mean()
-    return total_loss, state
+    solved_mask = lits_logits.gt(0).any(dim=-1).all(dim=-1)
+    return total_loss, state, solved_mask
 
-def train_gnn(problems, steps=10, lr=1e-3, hidden_dim=16, num_rounds=10, generator=None, batch_size=None, test_size=None, outer_rounds=1, model=None, n=None):
+def train_gnn(problems, steps=10, lr=1e-3, hidden_dim=16, num_rounds=10, generator=None, batch_size=None, test_size=None, outer_rounds=1, model=None, n=None, timeout=None):
     if n is None:
         n = problems.abs().max().item()
     if problems.ndim == 2:
@@ -345,49 +395,68 @@ def train_gnn(problems, steps=10, lr=1e-3, hidden_dim=16, num_rounds=10, generat
 
     last_loss = 0.0
 
-    for step in range(steps):
+    B = B - (B % batch_size)  # Trim to multiple of batch_size
+
+    for step in range(steps*outer_rounds):
         perm = torch.randperm(B, device=problems.device, generator=generator)
         total_loss_accum = 0.0
         total_seen = 0
+        state = model.init_state(problems[0:batch_size], n=n)
+        steps2 = torch.zeros(batch_size, dtype=torch.long, device=problems.device)
+        batch = problems[0:batch_size].clone()
+        solved_mask = torch.ones(batch_size, dtype=torch.bool, device=problems.device)
 
         for start in range(0, B, batch_size):
             idx = perm[start:start + batch_size]
-            batch = problems[idx]
-            bB = batch.size(0)
+            new_batch = problems[idx]
+            batch[solved_mask] = new_batch[solved_mask]
 
-            state = None
-            for _ in range(outer_rounds):
-                opt.zero_grad()
-                total_loss, state = compute_batch_loss(model, batch, state)
-                total_loss.backward()
-                opt.step()
+            state = GNNState.where(solved_mask, state, model.init_state(batch, n=n))
+            opt.zero_grad()
+            total_loss, state, solved_mask = compute_batch_loss(model, batch, state)
+            total_loss.backward()
+            opt.step()
 
-                total_loss_accum += total_loss.item() * bB
-                total_seen += bB
+            total_loss_accum += total_loss.item() * batch_size
+            total_seen += batch_size
+            steps2 += 1
+            solved_mask =  steps2.ge(outer_rounds) | solved_mask
+            steps2[solved_mask] = 0
+            if timeout is not None and time.time() - t_start > timeout:
+                break
+        if timeout is not None and time.time() - t_start > timeout:
+            break
+
 
         last_loss = total_loss_accum / max(total_seen, 1)
 
     if problems.size(0) > 0:
         with torch.no_grad():
             state = None
+            solved_mask = torch.zeros(B, dtype=torch.bool, device=problems.device)
             for _ in range(outer_rounds):
                 var_logits, state = model(problems, state)
+                solved_mask |= is_solved(problems, var_logits)
             clause_accuracy, exact_accuracy = compute_clause_and_exact_accuracy(problems, var_logits)
+            exact_accuracy = 100.0 * solved_mask.sum().item() / B
         print(f"GNN Step {step+1}: loss={last_loss:.6f}, clause_accuracy={clause_accuracy:.2f}%, exact_accuracy={exact_accuracy:.2f}% in {time.time()-t_start:.2f} seconds")
 
     if test_size is not None:
         with torch.no_grad():
             t = time.time()
             state = None
+            solved_mask = torch.zeros(test_size, dtype=torch.bool, device=problems.device)
             for _ in range(outer_rounds):
                 var_logits, state = model(test, state)
+                solved_mask |= is_solved(test, var_logits)
             clause_accuracy, exact_accuracy = compute_clause_and_exact_accuracy(test, var_logits)
+            exact_accuracy = 100.0 * solved_mask.sum().item() / test_size
         print(f"GNN Test: clause_accuracy={clause_accuracy:.2f}%, exact_accuracy={exact_accuracy:.2f}% in {time.time()-t:.2f} seconds")
     
     return model, clause_accuracy, exact_accuracy
 
 if __name__ == "__main__":
-    n = 100
+    n = 40
     device='mps' if torch.backends.mps.is_available() else 'cuda' if torch.cuda.is_available() else 'cpu'
     print("Using device:", device)
     generator=torch.Generator(device=device).manual_seed(0)
@@ -396,10 +465,11 @@ if __name__ == "__main__":
     print_assignment(nae100_assignments[0])
     train_clauses(n, nae100_problems[0:256], steps=1000, lr=1, generator=generator)
 
+    model = None
     while True:
-        model, _, _ = train_gnn(nae_3sat(100, device=device, batch_size=2*4096+256, generator=generator)[0],
+        model, _, _ = train_gnn(nae_3sat(n, device=device, batch_size=2*4096+256, generator=generator)[0],
                         steps=10, lr=0.001, hidden_dim=16, num_rounds=15, generator=generator,
-                            batch_size=256, test_size=256, outer_rounds=4)
+                            batch_size=256, test_size=256, outer_rounds=4, n=n, timeout=None, model=model)
                     
     nae1000_problem, nae1000_assignment = nae_3sat(1000, device=device, generator=generator)
     write_cnf(nae1000_problem, 'test_nae3sat_big.cnf')
