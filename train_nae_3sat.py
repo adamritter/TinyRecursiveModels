@@ -367,7 +367,8 @@ def compute_batch_loss(model, batch, state):
     lits_logits = clauses_sign * gathered_var_logits
 
     clause_logprobs = F.logsigmoid(-prod_logits(-lits_logits, dim=-1))
-    total_loss = torch.logsumexp(-clause_logprobs, dim=0).mean()
+    total_loss = torch.logsumexp(-clause_logprobs, dim=[0, 1]).mean()
+    
     solved_mask = lits_logits.gt(0).any(dim=-1).all(dim=-1)
     return total_loss, state, solved_mask
 
